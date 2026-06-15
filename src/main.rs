@@ -1,7 +1,7 @@
 use std::env;
 
 use chromiumoxide::{BrowserConfig, handler::viewport::Viewport};
-use tracing::{Instrument, info_span};
+use tracing::{Instrument, Level, event, info_span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{ollama::OllamaRunner, scraper::Scraper, summarize::Summarize};
@@ -42,7 +42,11 @@ async fn main() {
         eprintln!("Missding argument 1 for URL");
         return;
     };
-    let doc = scraper.get_markdown_uncropped(url).await.expect("Read URL failed");
+    let doc = scraper
+        .get_markdown_uncropped(url)
+        .await
+        .expect("Read URL failed");
+    event!(Level::TRACE, "document: {doc}");
     let summarizer = Summarize::new(runner);
     let summary = summarizer.summarize(&doc).await.expect("Summarize failed");
     println!("{}", summary);
