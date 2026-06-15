@@ -90,6 +90,14 @@ impl Scraper {
 
         let font = FontRef::try_from_slice(include_bytes!("MapleMono-Bold.otf")).unwrap();
         for iter_num in 0..self.max_iterations {
+            let css = page.layout_metrics().await?;
+            let viewport_default = {
+                let vp = css.css_visual_viewport;
+                Rect::at(vp.offset_x.round() as i32, vp.offset_y.round() as i32).of_size(
+                    vp.client_width.round() as u32,
+                    vp.client_height.round() as u32,
+                )
+            };
             let sections: Vec<BoundingRect> = page
                 .evaluate_expression(js_func_call(
                     include_str!("split-element.js"),
@@ -101,7 +109,14 @@ impl Scraper {
             const PADDING: u32 = 12;
             let sections: Vec<Section> = sections
                 .iter()
-                .filter(|it| it.width as u32 >= PADDING && it.height as u32 >= PADDING)
+                .filter(|it| {
+                    it.width as u32 >= PADDING
+                        && it.height as u32 >= PADDING
+                        && it.left + it.width > 0f32
+                        && it.top + it.height > 0f32
+                        && it.left < viewport_default.right() as f32
+                        && it.top < viewport_default.bottom() as f32
+                })
                 .enumerate()
                 .map(|(idx, it)| Section {
                     bounds: it.clone().into(),
@@ -113,14 +128,6 @@ impl Scraper {
                 event!(Level::INFO, "iterations ended with no sections");
                 return Ok(convert_html_to_md(page.content().await?.as_str())?);
             }
-            let css = page.layout_metrics().await?;
-            let viewport_default = {
-                let vp = css.css_visual_viewport;
-                Rect::at(vp.offset_x.round() as i32, vp.offset_y.round() as i32).of_size(
-                    vp.client_width.round() as u32,
-                    vp.client_height.round() as u32,
-                )
-            };
             let mut unannotated: BinaryHeap<Reverse<&Section>> =
                 sections.iter().map(Reverse).collect();
             let mut screenshots = Vec::new();
