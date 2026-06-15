@@ -1,4 +1,8 @@
-use std::{fmt::Display, ops::DerefMut, sync::Arc};
+use std::{
+    fmt::{Debug, Display},
+    ops::DerefMut,
+    sync::Arc,
+};
 
 use axum::{
     Form, Json, Router,
@@ -42,7 +46,7 @@ async fn main() {
         )
         .init();
 
-    let app = app(
+    let (app, state) = init(
         CachedRegistry::new(FsRegistry::new(&args.data_dir)),
         BrowserConfig::builder()
             .chrome_executable(
@@ -61,12 +65,15 @@ async fn main() {
         OllamaRunner::default(),
     )
     .await
-    .expect("Create app error");
+    .expect("Init app error");
     let listener = tokio::net::TcpListener::bind(&args.bind)
         .await
         .expect("Failed to bind");
     tracing::debug!("Listening on {}", args.bind);
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_handler(state))
+        .await
+        .unwrap();
 }
 
 struct AppState<R> {
@@ -75,19 +82,27 @@ struct AppState<R> {
     summarizer: Summarize,
 }
 
-async fn app<R>(tasks: R, browser: BrowserConfig, ollama: OllamaRunner) -> anyhow::Result<Router>
+async fn init<R>(
+    tasks: R,
+    browser: BrowserConfig,
+    ollama: OllamaRunner,
+) -> anyhow::Result<(Router, Arc<AppState<R>>)>
 where
     R: TaskRegistry + Send + Sync + 'static,
     R::Error: IntoResponse + Display,
 {
-    Ok(Router::new()
-        .route("/task", post(task_create_handler))
-        .route("/task/{id}", get(task_get_handler))
-        .with_state(Arc::new(AppState {
-            registry: RwLock::new(tasks),
-            scraper: Scraper::launch_browser(browser, ollama.clone()).await?,
-            summarizer: Summarize::new(ollama),
-        })))
+    let state = Arc::new(AppState {
+        registry: RwLock::new(tasks),
+        scraper: Scraper::launch_browser(browser, ollama.clone()).await?,
+        summarizer: Summarize::new(ollama),
+    });
+    Ok((
+        Router::new()
+            .route("/task", post(task_create_handler))
+            .route("/task/{id}", get(task_get_handler))
+            .with_state(Arc::clone(&state)),
+        state,
+    ))
 }
 
 async fn task_create_handler<R>(
@@ -192,5 +207,47 @@ impl IntoResponse for GetTask {
 impl From<Option<Task>> for GetTask {
     fn from(value: Option<Task>) -> Self {
         value.map(Self::Found).unwrap_or(Self::NotFound)
+    }
+}
+
+trait Shutdown {
+    async fn shutdown(&self);
+}
+
+async fn shutdown_handler(state: impl Shutdown) {
+    use tokio::signal;
+
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    state.shutdown().await;
+}
+
+impl<R> Shutdown for Arc<AppState<CachedRegistry<R>>>
+where
+    R: TaskRegistry + Send + Sync,
+    R::Error: Display + Debug,
+{
+    async fn shutdown(&self) {
+        self.registry.read().await.flush().await.unwrap();
     }
 }
