@@ -9,7 +9,6 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use chromiumoxide::{
     Browser, BrowserConfig, Page,
     cdp::browser_protocol::{
-        headless_experimental::{ScreenshotParams, ScreenshotParamsFormat},
         page::{CaptureScreenshotFormat, CaptureScreenshotParams, NavigateParams, Viewport},
         target::CreateTargetParams,
     },
@@ -27,16 +26,17 @@ use ollama_rs::{
     generation::{
         chat::{ChatMessage, request::ChatMessageRequest},
         images::Image,
-        parameters::{FormatType, JsonStructure, ThinkType},
+        parameters::ThinkType,
     },
 };
 use regex::bytes::Regex;
-use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{Level, event, info_span};
 
 use crate::ollama::OllamaRunner;
+
+pub use chromiumoxide;
 
 pub struct Scraper {
     browser: Browser,

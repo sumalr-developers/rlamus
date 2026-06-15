@@ -2245,8 +2245,17 @@ checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 name = "rlamus"
 version = "0.1.0"
 dependencies = [
+ "rlamus-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "rlamus-core"
+version = "0.1.0"
+dependencies = [
  "ab_glyph",
- "axum",
  "base64",
  "chromiumoxide",
  "futures",
@@ -2260,8 +2269,18 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "rlamus-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "rlamus-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

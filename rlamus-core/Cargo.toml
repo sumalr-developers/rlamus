@@ -1,0 +1,21 @@
+[package]
+name = "rlamus-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ab_glyph = "*"
+thiserror = "2"
+base64 = "0.22"
+schemars = "1.2.1"
+serde_json = "1.0.150"
+regex = "1.12.4"
+url = "*"
+tracing = "0.1"
+chromiumoxide = "0.9.1"
+futures = "0.3.32"
+html-to-markdown-rs = "3.6.1"
+imageproc = "0.27.0"
+ollama-rs = "0.3.4"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

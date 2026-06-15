@@ -1,14 +1,16 @@
 use std::env;
 
-use chromiumoxide::{BrowserConfig, handler::viewport::Viewport};
 use tracing::{Instrument, Level, event, info_span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{ollama::OllamaRunner, scraper::Scraper, summarize::Summarize};
-
-mod ollama;
-mod scraper;
-mod summarize;
+use rlamus_core::{
+    ollama::OllamaRunner,
+    scraper::{
+        Scraper,
+        chromiumoxide::{BrowserConfig, handler::viewport::Viewport},
+    },
+    summarize::Summarize,
+};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
@@ -39,7 +41,7 @@ async fn main() {
     .await
     .expect("Failed to launch scraper");
     let Some(url) = env::args().skip(1).next() else {
-        eprintln!("Missding argument 1 for URL");
+        eprintln!("Missing argument 1 for URL");
         return;
     };
     let doc = scraper

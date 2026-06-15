@@ -1,0 +1,11 @@
+[package]
+name = "rlamus-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = { version = "0.8.9", features = ["multipart"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing = "0.1"
+rlamus-core = { path = "../rlamus-core" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
