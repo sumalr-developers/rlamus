@@ -1,0 +1,49 @@
+use futures::Stream;
+use serde::{Deserialize, Serialize};
+use smol_str::{SmolStr, ToSmolStr};
+use uuid::Uuid;
+
+mod cached_registry;
+mod fs_registry;
+
+pub use cached_registry::CachedRegistry;
+pub use fs_registry::FsRegistry;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Task {
+    pub id: Uuid,
+    pub url: SmolStr,
+    pub state: TaskState,
+}
+
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub enum TaskState {
+    #[default]
+    Init,
+    Scraping,
+    Summarizing,
+    Done(SmolStr),
+    Failed(SmolStr),
+}
+
+#[trait_variant::make(Send)]
+pub trait TaskRegistry {
+    type Error;
+
+    async fn insert(&mut self, task: Task) -> Result<(), Self::Error>;
+    async fn remove(&mut self, id: &Uuid) -> Result<Option<Task>, Self::Error>;
+    async fn get(&self, id: &Uuid) -> Result<Option<Task>, Self::Error>;
+    fn iter(&self) -> impl Stream<Item = Result<Task, Self::Error>>;
+
+    fn changes_on(&mut self, id: &Uuid) -> impl Stream<Item = Task>;
+}
+
+impl Task {
+    pub fn new(url: impl ToSmolStr) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            url: url.to_smolstr(),
+            state: TaskState::Init,
+        }
+    }
+}
