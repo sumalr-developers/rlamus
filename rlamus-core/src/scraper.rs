@@ -32,7 +32,7 @@ use ollama_rs::{
 use regex::bytes::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{Level, event, info_span};
+use tracing::{Level, event, event_enabled, info_span};
 
 use crate::ollama::OllamaRunner;
 
@@ -159,10 +159,12 @@ impl Scraper {
                 screenshots.push(screenshot);
                 unannotated.retain(|Reverse(it)| !annotated.contains(&it.id));
             }
-            for (idx, screenshot) in screenshots.iter().enumerate() {
-                screenshot
-                    .save(format!("scraper iter {} split.{}.png", iter_num, idx))
-                    .unwrap();
+            if event_enabled!(Level::TRACE) {
+                for (idx, screenshot) in screenshots.iter().enumerate() {
+                    let filename = format!("scraper iter {} split.{}.png", iter_num, idx);
+                    tracing::trace!("saving screenshot to {filename:?}");
+                    screenshot.save(filename).unwrap();
+                }
             }
             let mut history = vec![];
             let res = self
@@ -196,14 +198,18 @@ impl Scraper {
                 format!("{}", main_section.js_id),
             ))
             .await?;
-            page.save_screenshot(
-                CaptureScreenshotParams::builder()
-                    .format(CaptureScreenshotFormat::Png)
-                    .build(),
-                format!("scraper iter {iter_num} cleanup.png"),
-            )
-            .await
-            .unwrap();
+            if event_enabled!(Level::TRACE) {
+                let filename = format!("scraper iter {iter_num} cleanup.png");
+                tracing::trace!("saving screenshot to {filename:?}");
+                page.save_screenshot(
+                    CaptureScreenshotParams::builder()
+                        .format(CaptureScreenshotFormat::Png)
+                        .build(),
+                    filename,
+                )
+                .await
+                .unwrap();
+            }
             let markdown = convert_html_to_md(page.content().await?.as_str())?;
             if markdown.len() <= self.max_len || iter_num == self.max_iterations - 1 {
                 if markdown.len() > self.max_len {
