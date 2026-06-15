@@ -17,6 +17,7 @@ pub struct Task {
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum TaskState {
     #[default]
     Init,
