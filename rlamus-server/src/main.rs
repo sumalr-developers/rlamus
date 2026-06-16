@@ -1,17 +1,21 @@
 use std::{
+    convert::Infallible,
     fmt::{Debug, Display},
+    future,
     ops::DerefMut,
     sync::Arc,
+    time::Duration,
 };
 
 use axum::{
     Form, Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, Sse, sse},
     routing::{get, post},
 };
 use clap::Parser;
+use futures::{Stream, StreamExt};
 use rlamus_core::{
     ollama::OllamaRunner,
     scraper::{
@@ -69,7 +73,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&args.bind)
         .await
         .expect("Failed to bind");
-    tracing::debug!("Listening on {}", args.bind);
+    tracing::debug!("listening on {}", args.bind);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_handler(state))
         .await
@@ -89,7 +93,7 @@ async fn init<R>(
 ) -> anyhow::Result<(Router, Arc<AppState<R>>)>
 where
     R: TaskRegistry + Send + Sync + 'static,
-    R::Error: IntoResponse + Display,
+    R::Error: IntoResponse + Send + Display,
 {
     let state = Arc::new(AppState {
         registry: RwLock::new(tasks),
@@ -100,6 +104,7 @@ where
         Router::new()
             .route("/task", post(task_create_handler))
             .route("/task/{id}", get(task_get_handler))
+            .route("/task/{id}/sse", get(task_sse_get_handler))
             .with_state(Arc::clone(&state)),
         state,
     ))
@@ -155,7 +160,7 @@ where
     _ = registry
         .insert(task)
         .await
-        .inspect_err(|err| tracing::error!("Failed to update task state: {err}"));
+        .inspect_err(|err| tracing::error!("failed to update task state: {err}"));
 }
 
 async fn task_get_handler<R>(
@@ -167,6 +172,28 @@ where
     R::Error: IntoResponse,
 {
     Ok(app.registry.read().await.get(&id).await?.into())
+}
+
+async fn task_sse_get_handler<R>(
+    State(app): State<Arc<AppState<R>>>,
+    Path(id): Path<Uuid>,
+) -> Sse<impl Stream<Item = Result<sse::Event, Infallible>>>
+where
+    R: TaskRegistry + 'static,
+    R::Error: IntoResponse + Send,
+{
+    let current = app.registry.read().await.get(&id).await;
+    let stream = futures::stream::once(future::ready(current))
+        .filter_map(async |it| it.ok().and_then(|it| it))
+        .chain(app.registry.read().await.changes_on(id))
+        .map(|task| sse::Event::default().json_data(task).unwrap())
+        .map(Ok);
+
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(1))
+            .text("keep-alive-text"),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -239,6 +266,7 @@ async fn shutdown_handler(state: impl Shutdown) {
         _ = terminate => {},
     }
 
+    tracing::info!("shutting down gracefully");
     state.shutdown().await;
 }
 

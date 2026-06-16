@@ -200,14 +200,14 @@ where
         }
     }
 
-    fn changes_on(&mut self, id: &Uuid) -> impl Stream<Item = Task> {
+    fn changes_on(&self, id: Uuid) -> impl Stream<Item = Task> + use<Inner> {
         let mut rx = self.rx.resubscribe();
 
         stream! {
             loop {
                 match rx.recv().await {
                     Ok(task) => {
-                        if &task.id == id {
+                        if task.id == id {
                             yield task;
                         }
                     },
