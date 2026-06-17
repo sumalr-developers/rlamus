@@ -196,9 +196,14 @@ where
 {
     let current = app.registry.read().await.get(&id).await;
     let stream = futures::stream::once(future::ready(current))
-        .filter_map(async |it| it.ok().and_then(|it| it))
+        .filter_map(async |it| it.ok().flatten())
         .chain(app.registry.read().await.changes_on(id))
-        .map(|task| sse::Event::default().json_data(task).unwrap())
+        .map(|task| {
+            sse::Event::default()
+                .event("update")
+                .json_data(task)
+                .unwrap()
+        })
         .map(Ok);
 
     Sse::new(stream).keep_alive(
