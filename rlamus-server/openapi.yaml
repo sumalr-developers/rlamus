@@ -1,0 +1,121 @@
+openapi: 3.1.0
+info:
+  title: Default module
+  description: ''
+  version: 1.0.0
+tags: []
+paths:
+  /task:
+    post:
+      summary: create task
+      deprecated: false
+      description: ''
+      tags: []
+      parameters: []
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                url:
+                  example: ''
+                  type: string
+            examples: {}
+        required: true
+      responses:
+        '201':
+          description: ''
+          content:
+            text/plain:
+              schema:
+                type: object
+                properties: {}
+          headers: {}
+      security: []
+  /task/{id}:
+    get:
+      summary: poll task state
+      deprecated: false
+      description: ''
+      tags: []
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example: ''
+          headers: {}
+      security: []
+  /task/{id}/sse:
+    get:
+      summary: sse task state
+      deprecated: false
+      description: ''
+      tags: []
+      parameters:
+        - name: id
+          in: path
+          description: ''
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            text/event-stream:
+              schema:
+                type: object
+                properties: {}
+          headers: {}
+      security: []
+webhooks: {}
+components:
+  schemas:
+    Task:
+      type: object
+      properties:
+        id:
+          type: string
+          description: ID
+        url:
+          type: string
+        state:
+          oneOf:
+            - type: string
+              enum:
+                - init
+                - scraping
+                - summarizing
+            - type: object
+              properties:
+                done:
+                  type: string
+                  description: summary
+                failed:
+                  type: string
+                  description: error message
+      required:
+        - id
+        - url
+        - state
+  responses:
+    Task:
+      description: ''
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Task'
+  securitySchemes: {}
+servers: []
+security: []
