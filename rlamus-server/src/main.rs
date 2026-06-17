@@ -12,7 +12,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response, Sse, sse},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use clap::Parser;
 use futures::{Stream, StreamExt};
@@ -104,6 +104,7 @@ where
         Router::new()
             .route("/task", post(task_create_handler))
             .route("/task/{id}", get(task_get_handler))
+            .route("/task/{id}", delete(task_delete_handler))
             .route("/task/{id}/sse", get(task_sse_get_handler))
             .with_state(Arc::clone(&state)),
         state,
@@ -174,6 +175,17 @@ where
     Ok(app.registry.read().await.get(&id).await?.into())
 }
 
+async fn task_delete_handler<R>(
+    State(app): State<Arc<AppState<R>>>,
+    Path(id): Path<Uuid>,
+) -> Result<DeleteTask, R::Error>
+where
+    R: TaskRegistry,
+    R::Error: IntoResponse,
+{
+    Ok(app.registry.write().await.remove(&id).await?.into())
+}
+
 async fn task_sse_get_handler<R>(
     State(app): State<Arc<AppState<R>>>,
     Path(id): Path<Uuid>,
@@ -210,6 +222,11 @@ enum GetTask {
     Found(Task),
 }
 
+enum DeleteTask {
+    NotFound,
+    Deleted,
+}
+
 impl IntoResponse for CreateTaskSuccess {
     fn into_response(self) -> Response {
         Response::builder()
@@ -231,9 +248,33 @@ impl IntoResponse for GetTask {
     }
 }
 
+impl IntoResponse for DeleteTask {
+    fn into_response(self) -> Response {
+        match self {
+            DeleteTask::NotFound => Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body("Task not found".into())
+                .unwrap(),
+            DeleteTask::Deleted => Response::builder()
+                .status(StatusCode::OK)
+                .body("Task deleted".into())
+                .unwrap(),
+        }
+    }
+}
+
 impl From<Option<Task>> for GetTask {
     fn from(value: Option<Task>) -> Self {
         value.map(Self::Found).unwrap_or(Self::NotFound)
+    }
+}
+
+impl From<Option<Task>> for DeleteTask {
+    fn from(value: Option<Task>) -> Self {
+        match value {
+            Some(_) => Self::Deleted,
+            None => Self::NotFound,
+        }
     }
 }
 
