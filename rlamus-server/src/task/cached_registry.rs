@@ -142,7 +142,9 @@ where
         cache.insert(task.id.clone(), task.clone());
 
         if cache.len() > self.cache_limit || self.op_queue.read().await.len() >= self.auto_flush {
+            drop(cache);
             self.flush().await?;
+            let mut cache = self.cache.write().await;
             while cache.len() > self.cache_limit {
                 let Some(id) = self.lru.write().await.pop_front() else {
                     break;
