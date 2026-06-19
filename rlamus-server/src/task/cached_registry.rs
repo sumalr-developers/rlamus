@@ -132,19 +132,19 @@ where
 {
     type Error = Error<Inner::Error>;
 
-    async fn insert(&mut self, task: Task) -> Result<(), Self::Error> {
+    async fn insert(&self, task: Task) -> Result<(), Self::Error> {
         self.op_queue
             .write()
             .await
             .insert(task.id.clone(), Op::Insert);
-        self.lru.get_mut().push_back(task.id.clone());
+        self.lru.write().await.push_back(task.id.clone());
         let mut cache = self.cache.write().await;
         cache.insert(task.id.clone(), task.clone());
 
         if cache.len() > self.cache_limit || self.op_queue.read().await.len() >= self.auto_flush {
             self.flush().await?;
             while cache.len() > self.cache_limit {
-                let Some(id) = self.lru.get_mut().pop_front() else {
+                let Some(id) = self.lru.write().await.pop_front() else {
                     break;
                 };
                 cache.remove(&id);
@@ -154,9 +154,9 @@ where
         Ok(())
     }
 
-    async fn remove(&mut self, id: &Uuid) -> Result<Option<Task>, Self::Error> {
+    async fn remove(&self, id: &Uuid) -> Result<Option<Task>, Self::Error> {
         self.op_queue.write().await.insert(id.clone(), Op::Remove);
-        self.lru.get_mut().extract_if(|it| it == id).next();
+        self.lru.write().await.extract_if(|it| it == id).next();
         if self.op_queue.read().await.len() >= self.auto_flush {
             self.flush().await?;
         }

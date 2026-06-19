@@ -31,8 +31,8 @@ pub enum TaskState {
 pub trait TaskRegistry {
     type Error;
 
-    async fn insert(&mut self, task: Task) -> Result<(), Self::Error>;
-    async fn remove(&mut self, id: &Uuid) -> Result<Option<Task>, Self::Error>;
+    async fn insert(&self, task: Task) -> Result<(), Self::Error>;
+    async fn remove(&self, id: &Uuid) -> Result<Option<Task>, Self::Error>;
     async fn get(&self, id: &Uuid) -> Result<Option<Task>, Self::Error>;
     fn iter(&self) -> impl Stream<Item = Result<Task, Self::Error>>;
 

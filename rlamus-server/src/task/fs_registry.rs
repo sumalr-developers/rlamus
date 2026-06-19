@@ -31,7 +31,7 @@ impl FsRegistry {
 impl TaskRegistry for FsRegistry {
     type Error = Error;
 
-    async fn insert(&mut self, task: Task) -> Result<(), Self::Error> {
+    async fn insert(&self, task: Task) -> Result<(), Self::Error> {
         tokio::fs::write(
             self.path_by_id(&task.id),
             serde_json::to_vec(&task).unwrap(),
@@ -41,7 +41,7 @@ impl TaskRegistry for FsRegistry {
         Ok(())
     }
 
-    async fn remove(&mut self, id: &Uuid) -> Result<Option<Task>, Self::Error> {
+    async fn remove(&self, id: &Uuid) -> Result<Option<Task>, Self::Error> {
         let Some(task) = self.get(id).await? else {
             return Ok(None);
         };

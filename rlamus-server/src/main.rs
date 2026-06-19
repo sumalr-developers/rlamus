@@ -2,7 +2,6 @@ use std::{
     convert::Infallible,
     fmt::{Debug, Display},
     future,
-    ops::DerefMut,
     sync::Arc,
     time::Duration,
 };
@@ -25,7 +24,6 @@ use rlamus_core::{
     summarize::Summarize,
 };
 use serde::Deserialize;
-use tokio::sync::RwLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
@@ -81,7 +79,7 @@ async fn main() {
 }
 
 struct AppState<R> {
-    registry: RwLock<R>,
+    registry: R,
     scraper: Scraper,
     summarizer: Summarize,
 }
@@ -96,7 +94,7 @@ where
     R::Error: IntoResponse + Send + Display,
 {
     let state = Arc::new(AppState {
-        registry: RwLock::new(tasks),
+        registry: tasks,
         scraper: Scraper::launch_browser(browser, ollama.clone()).await?,
         summarizer: Summarize::new(ollama),
     });
@@ -121,22 +119,22 @@ where
 {
     let mut task = Task::new(input.url.clone());
     let task_id = task.id.clone();
-    app.registry.write().await.insert(task.clone()).await?;
+    app.registry.insert(task.clone()).await?;
     tokio::spawn(async move {
         task.state = TaskState::Scraping;
-        update_task_in_registry(task.clone(), app.registry.write().await.deref_mut()).await;
+        update_task_in_registry(task.clone(), &app.registry).await;
 
         let doc = match app.scraper.get_markdown_uncropped(input.url).await {
             Ok(doc) => doc,
             Err(err) => {
                 task.state = TaskState::Failed(format!("Page scraping failed: {err}").into());
-                update_task_in_registry(task, app.registry.write().await.deref_mut()).await;
+                update_task_in_registry(task, &app.registry).await;
                 return;
             }
         };
 
         task.state = TaskState::Summarizing;
-        update_task_in_registry(task.clone(), app.registry.write().await.deref_mut()).await;
+        update_task_in_registry(task.clone(), &app.registry).await;
         let summary = app.summarizer.summarize(&doc).await;
         match summary {
             Ok(summary) => {
@@ -146,14 +144,14 @@ where
                 task.state = TaskState::Failed(format!("Summarization failed: {err}").into());
             }
         }
-        update_task_in_registry(task, app.registry.write().await.deref_mut()).await;
+        update_task_in_registry(task, &app.registry).await;
     });
     Ok(CreateTaskSuccess {
         task_id: task_id.clone(),
     })
 }
 
-async fn update_task_in_registry<R>(task: Task, registry: &mut R)
+async fn update_task_in_registry<R>(task: Task, registry: &R)
 where
     R: TaskRegistry,
     R::Error: Display,
@@ -172,7 +170,7 @@ where
     R: TaskRegistry,
     R::Error: IntoResponse,
 {
-    Ok(app.registry.read().await.get(&id).await?.into())
+    Ok(app.registry.get(&id).await?.into())
 }
 
 async fn task_delete_handler<R>(
@@ -183,7 +181,7 @@ where
     R: TaskRegistry,
     R::Error: IntoResponse,
 {
-    Ok(app.registry.write().await.remove(&id).await?.into())
+    Ok(app.registry.remove(&id).await?.into())
 }
 
 async fn task_sse_get_handler<R>(
@@ -194,10 +192,10 @@ where
     R: TaskRegistry + 'static,
     R::Error: IntoResponse + Send,
 {
-    let current = app.registry.read().await.get(&id).await;
+    let current = app.registry.get(&id).await;
     let stream = futures::stream::once(future::ready(current))
         .filter_map(async |it| it.ok().flatten())
-        .chain(app.registry.read().await.changes_on(id))
+        .chain(app.registry.changes_on(id))
         .map(|task| {
             sse::Event::default()
                 .event("update")
@@ -322,6 +320,11 @@ where
     R::Error: Display + Debug,
 {
     async fn shutdown(&self) {
-        self.registry.read().await.flush().await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), self.registry.flush()).await {
+            Ok(_) => {}
+            Err(_) => {
+                tracing::warn!("failed to flush registry in time, skipping");
+            }
+        }
     }
 }
