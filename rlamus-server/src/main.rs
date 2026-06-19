@@ -100,6 +100,7 @@ where
     });
     Ok((
         Router::new()
+            .route("/", get(root_handler))
             .route("/task", post(task_create_handler))
             .route("/task/{id}", get(task_get_handler))
             .route("/task/{id}", delete(task_delete_handler))
@@ -107,6 +108,10 @@ where
             .with_state(Arc::clone(&state)),
         state,
     ))
+}
+
+async fn root_handler() -> &'static str {
+    "rlamus-server api:1"
 }
 
 async fn task_create_handler<R>(
