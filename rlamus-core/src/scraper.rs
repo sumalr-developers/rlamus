@@ -172,7 +172,8 @@ impl Scraper {
             .ollama
             .send_chat_messages_with_history(&mut history, {
                 let msg = ChatMessage::user(format!(
-                        "You're tasked with identifying the main section where key info lives, which is neither a navigation bar nor footer. There are {} sections, each marked by a red rectangle and a center aligned label. Respond with a number. No explanations.",
+                        "Page's titled {:?}. You're tasked with identifying the main section where key info lives, which is neither a navigation bar nor footer. There are {} sections, each marked by a red rectangle and a center aligned label. Respond with a number. No explanations.", 
+                        page.get_title().await.ok().flatten().unwrap_or("unknown".into()),
                         sections.len())
                     ).with_images(screenshots.into_iter().map(|it| {
                     let mut buf = vec![];
