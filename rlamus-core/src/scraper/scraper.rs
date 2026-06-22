@@ -14,8 +14,7 @@ use chromiumoxide::{
     },
     error::CdpError,
 };
-use futures::StreamExt;
-use html_to_markdown_rs::{ConversionOptions, LinkStyle};
+use futures::{FutureExt, StreamExt};
 use imageproc::{
     drawing,
     image::{self, ImageFormat, RgbImage, codecs::png::PngEncoder},
@@ -32,9 +31,15 @@ use ollama_rs::{
 use regex::bytes::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{Level, event, event_enabled, info_span};
+use tracing::{Instrument, Level, event, event_enabled, info_span};
 
-use crate::ollama::OllamaRunner;
+use crate::{
+    ollama::OllamaRunner,
+    scraper::{
+        compatiblity::{self, CompatibilityLayer},
+        convert_html_to_md,
+    },
+};
 
 pub use chromiumoxide;
 
@@ -42,6 +47,7 @@ pub struct Scraper {
     browser: Browser,
     handle: tokio::task::JoinHandle<()>,
     runner: OllamaRunner,
+    compatibiltiy_layer: CompatibilityLayer,
     max_len: usize,
     max_iterations: usize,
 }
@@ -56,6 +62,7 @@ impl Scraper {
             browser,
             handle: tokio::spawn(async move { while handler.next().await.is_some() {} }),
             runner: runner.into(),
+            compatibiltiy_layer: CompatibilityLayer::default(),
             max_len: 5_000,
             max_iterations: 5,
         })
@@ -71,10 +78,35 @@ impl Scraper {
         self
     }
 
+    pub fn compatibility_layer(mut self, value: CompatibilityLayer) -> Self {
+        self.compatibiltiy_layer = value;
+        self
+    }
+
     pub async fn get_markdown_uncropped(
         &self,
         url: impl Into<NavigateParams>,
     ) -> Result<String, Error> {
+        let nav_destination = url.into();
+        let original_url = nav_destination.url.clone();
+        match self
+            .compatibiltiy_layer
+            .scrape_markdown(&original_url)
+            .instrument(tracing::info_span!("compatible"))
+            .await
+        {
+            Ok(markdown) => {
+                tracing::info!("skipping web scraping in favor of compatibility layer");
+                tracing::trace!("compatible result: {markdown}");
+                return Ok(markdown);
+            }
+            Err(compatiblity::Error::CannotHandle) => {
+                // ignored
+            }
+            Err(err) => {
+                tracing::warn!("compatibility layer failed: {err}");
+            }
+        }
         let page = self
             .browser
             .new_page(
@@ -86,7 +118,32 @@ impl Scraper {
             .await
             .unwrap();
         page.enable_stealth_mode().await?;
-        page.goto(url).await.unwrap().wait_for_navigation().await?;
+        page.goto(nav_destination)
+            .await
+            .unwrap()
+            .wait_for_navigation()
+            .await?;
+
+        if let Ok(Some(url)) = page.url().await
+            && url != original_url
+        {
+            match self
+                .compatibiltiy_layer
+                .scrape_markdown(&url)
+                .instrument(tracing::info_span!("compatible"))
+                .await
+            {
+                Ok(markdown) => {
+                    return Ok(markdown);
+                }
+                Err(compatiblity::Error::CannotHandle) => {
+                    // ignored
+                }
+                Err(err) => {
+                    tracing::warn!("compatibility layer failed: {err}");
+                }
+            }
+        }
 
         let font = FontRef::try_from_slice(include_bytes!("MapleMono-Bold.otf")).unwrap();
         for iter_num in 0..self.max_iterations {
@@ -350,22 +407,6 @@ struct Section {
     bounds: Rect,
     id: u32,
     js_id: u32,
-}
-
-fn convert_html_to_md(content: &str) -> Result<String, Error> {
-    let markdown = html_to_markdown_rs::convert(
-        content,
-        Some(
-            ConversionOptions::builder()
-                .link_style(LinkStyle::Reference)
-                .extract_metadata(false)
-                .skip_images(true)
-                .build(),
-        ),
-    )?
-    .content
-    .unwrap();
-    Ok(markdown)
 }
 
 fn parse_model_section_res(content: &str) -> Option<u32> {

@@ -19,3 +19,5 @@ imageproc = "0.27.0"
 ollama-rs = "0.3.4"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+reqwest = { version = "0.13", features = ["json"] }
+atom_syndication = "0.12.8"
