@@ -7,7 +7,7 @@ use url::Url;
 
 use crate::scraper::reddit::RedditSiteScraper;
 
-trait SiteScraperHolder {
+trait SiteScraperHolder: Send + Sync {
     fn can_handle(&self, url: &Url) -> bool;
     fn scrape_markdown<'a>(
         &'a self,
@@ -19,7 +19,7 @@ struct ScraperInfo {
     name: &'static str,
 }
 
-pub trait SiteScraper: Send {
+pub trait SiteScraper {
     type Error: StdError;
 
     fn name() -> &'static str;
@@ -44,7 +44,7 @@ impl CompatibilityLayer {
 
     pub fn with_site_scraper<S>(mut self, scraper: S) -> Self
     where
-        S: SiteScraper + 'static,
+        S: SiteScraper + Send + Sync + 'static,
     {
         self.scrapers
             .push((ScraperInfo::new::<S>(), Box::new(scraper)));
@@ -80,7 +80,7 @@ impl Default for CompatibilityLayer {
 
 impl<S> SiteScraperHolder for S
 where
-    S: SiteScraper,
+    S: SiteScraper + Send + Sync,
     S::Error: StdError + 'static,
 {
     fn can_handle(&self, url: &Url) -> bool {
