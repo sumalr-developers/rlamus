@@ -12,8 +12,8 @@
 }:
 let
   pname = if package == null then "rlamus" else package;
-  otfCargoOrJsSource =
-    path: type: (builtins.match ".*/.*\\.(otf|js)$" path != null) || (craneLib.filterCargoSources path type);
+  otfMdCargoOrJsSource =
+    path: type: (builtins.match ".*/.*\\.(otf|js|md)$" path != null) || (craneLib.filterCargoSources path type);
 
   nativeBuildInputs = [
     pkg-config
@@ -57,7 +57,7 @@ craneLib.buildPackage (
       ;
     src = lib.sources.cleanSourceWith {
       src = ../.;
-      filter = otfCargoOrJsSource;
+      filter = otfMdCargoOrJsSource;
       name = "source";
     };
     APP_VERSION = version;
