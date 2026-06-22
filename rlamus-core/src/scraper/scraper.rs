@@ -14,7 +14,7 @@ use chromiumoxide::{
     },
     error::CdpError,
 };
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use imageproc::{
     drawing,
     image::{self, ImageFormat, RgbImage, codecs::png::PngEncoder},
@@ -36,6 +36,7 @@ use tracing::{Instrument, Level, event, event_enabled, info_span};
 use crate::{
     ollama::OllamaRunner,
     scraper::{
+        ScrapeResult,
         compatiblity::{self, CompatibilityLayer},
         convert_html_to_md,
     },
@@ -86,7 +87,7 @@ impl Scraper {
     pub async fn get_markdown_uncropped(
         &self,
         url: impl Into<NavigateParams>,
-    ) -> Result<String, Error> {
+    ) -> Result<ScrapeResult, Error> {
         let nav_destination = url.into();
         let original_url = nav_destination.url.clone();
         match self
@@ -95,10 +96,10 @@ impl Scraper {
             .instrument(tracing::info_span!("compatible"))
             .await
         {
-            Ok(markdown) => {
+            Ok(scrape) => {
                 tracing::info!("skipping web scraping in favor of compatibility layer");
-                tracing::trace!("compatible result: {markdown}");
-                return Ok(markdown);
+                tracing::trace!("compatible result: {}", scrape.content);
+                return Ok(scrape);
             }
             Err(compatiblity::Error::CannotHandle) => {
                 // ignored
@@ -119,10 +120,10 @@ impl Scraper {
             .unwrap();
         page.enable_stealth_mode().await?;
         page.goto(nav_destination)
-            .await
-            .unwrap()
+            .await?
             .wait_for_navigation()
             .await?;
+        let page_title = page.get_title().await.ok().flatten();
 
         if let Ok(Some(url)) = page.url().await
             && url != original_url
@@ -183,7 +184,10 @@ impl Scraper {
                 .collect();
             if sections.is_empty() {
                 event!(Level::INFO, "iterations ended with no sections");
-                return Ok(convert_html_to_md(page.content().await?.as_str())?);
+                return Ok(ScrapeResult {
+                    content: convert_html_to_md(page.content().await?.as_str())?,
+                    title: page_title,
+                });
             }
             let mut unannotated: BinaryHeap<Reverse<&Section>> =
                 sections.iter().map(Reverse).collect();
@@ -229,8 +233,8 @@ impl Scraper {
             .ollama
             .send_chat_messages_with_history(&mut history, {
                 let msg = ChatMessage::user(format!(
-                        "Page's titled {:?}. You're tasked with identifying the main section where key info lives, which is neither a navigation bar nor footer. There are {} sections, each marked by a red rectangle and a center aligned label. Respond with a number. No explanations.", 
-                        page.get_title().await.ok().flatten().unwrap_or("unknown".into()),
+                        "{}You're tasked with identifying the main section where key info lives, which is neither a navigation bar nor footer. There are {} sections, each marked by a red rectangle and a center aligned label. Respond with a number. No explanations.", 
+                        page_title.as_ref().map(|title| format!("Page's titled {title:?}. ")).unwrap_or("".into()),
                         sections.len())
                     ).with_images(screenshots.into_iter().map(|it| {
                     let mut buf = vec![];
@@ -274,7 +278,10 @@ impl Scraper {
                     event!(Level::INFO, "iterations ended with limit")
                 }
                 event!(Level::TRACE, "final iteration is {iter_num}");
-                return Ok(markdown);
+                return Ok(ScrapeResult {
+                    content: markdown,
+                    title: page_title,
+                });
             }
 
             let res = self.runner
@@ -293,16 +300,25 @@ impl Scraper {
             if !partitionable {
                 event!(Level::INFO, "iterations ended with no more partitions");
                 event!(Level::TRACE, "final iteration is {iter_num}");
-                return Ok(markdown);
+                return Ok(ScrapeResult {
+                    content: markdown,
+                    title: page_title,
+                });
             }
         }
         page.close().await?;
         panic!("Too many iterations");
     }
 
-    pub async fn get_markdown(&self, url: impl Into<NavigateParams>) -> Result<String, Error> {
-        let markdown = self.get_markdown_uncropped(url).await?;
-        Ok(markdown.chars().take(self.max_len).collect())
+    pub async fn get_markdown(
+        &self,
+        url: impl Into<NavigateParams>,
+    ) -> Result<ScrapeResult, Error> {
+        let scrape = self.get_markdown_uncropped(url).await?;
+        Ok(ScrapeResult {
+            content: scrape.content.chars().take(self.max_len).collect(),
+            title: scrape.title,
+        })
     }
 }
 

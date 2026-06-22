@@ -24,6 +24,7 @@ use rlamus_core::{
     summarize::Summarize,
 };
 use serde::Deserialize;
+use smol_str::ToSmolStr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
@@ -138,12 +139,18 @@ where
             }
         };
 
-        task.state = TaskState::Summarizing;
+        let title = doc.title.map(|it| it.to_smolstr());
+        task.state = TaskState::Summarizing {
+            title: title.clone(),
+        };
         update_task_in_registry(task.clone(), &app.registry).await;
-        let summary = app.summarizer.summarize(&doc).await;
+        let summary = app.summarizer.summarize(&doc.content).await;
         match summary {
             Ok(summary) => {
-                task.state = TaskState::Done(summary.into());
+                task.state = TaskState::Done {
+                    title,
+                    summary: summary.into(),
+                };
             }
             Err(err) => {
                 task.state = TaskState::Failed(format!("Summarization failed: {err}").into());

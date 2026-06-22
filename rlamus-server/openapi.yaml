@@ -21,7 +21,8 @@ paths:
                 url:
                   example: ''
                   type: string
-            examples: {}
+            example:
+              url: ''
         required: true
       responses:
         '201':
@@ -96,12 +97,22 @@ components:
               enum:
                 - init
                 - scraping
-                - summarizing
             - type: object
               properties:
                 done:
-                  type: string
-                  description: summary
+                  type: object
+                  properties:
+                    title:
+                      type: string
+                    summary:
+                      type: string
+                  required:
+                    - summary
+                summarizing:
+                  type: object
+                  properties:
+                    title:
+                      type: string
                 failed:
                   type: string
                   description: error message

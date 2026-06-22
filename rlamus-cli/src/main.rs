@@ -50,6 +50,12 @@ async fn main() {
         .expect("Read URL failed");
     event!(Level::TRACE, "document: {doc}");
     let summarizer = Summarize::new(runner);
-    let summary = summarizer.summarize(&doc).await.expect("Summarize failed");
+    let summary = summarizer
+        .summarize(&doc.content)
+        .await
+        .expect("Summarize failed");
+    if let Some(title) = doc.title {
+        println!("# {}", title);
+    }
     println!("{}", summary);
 }

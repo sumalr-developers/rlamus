@@ -5,14 +5,14 @@ use thiserror::Error;
 use tracing::{Instrument, debug_span};
 use url::Url;
 
-use crate::scraper::reddit::RedditSiteScraper;
+use crate::scraper::{ScrapeResult, reddit::RedditSiteScraper};
 
 trait SiteScraperHolder: Send + Sync {
     fn can_handle(&self, url: &Url) -> bool;
     fn scrape_markdown<'a>(
         &'a self,
         url: &'a Url,
-    ) -> BoxFuture<'a, Result<String, Box<dyn StdError>>>;
+    ) -> BoxFuture<'a, Result<ScrapeResult, Box<dyn StdError>>>;
 }
 
 struct ScraperInfo {
@@ -28,7 +28,7 @@ pub trait SiteScraper {
     fn scrape_markdown(
         &self,
         url: &Url,
-    ) -> impl Future<Output = Result<String, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<ScrapeResult, Self::Error>> + Send;
 }
 
 pub struct CompatibilityLayer {
@@ -51,7 +51,7 @@ impl CompatibilityLayer {
         self
     }
 
-    pub async fn scrape_markdown(&self, url: &str) -> Result<String, Error> {
+    pub async fn scrape_markdown(&self, url: &str) -> Result<ScrapeResult, Error> {
         let url = Url::parse(url)?;
         let (info, scraper) = self
             .scrapers
@@ -90,7 +90,7 @@ where
     fn scrape_markdown<'a>(
         &'a self,
         url: &'a Url,
-    ) -> BoxFuture<'a, Result<String, Box<dyn StdError>>> {
+    ) -> BoxFuture<'a, Result<ScrapeResult, Box<dyn StdError>>> {
         Box::pin(
             self.scrape_markdown(url)
                 .map_err(|err| Box::new(err) as Box<dyn StdError>),

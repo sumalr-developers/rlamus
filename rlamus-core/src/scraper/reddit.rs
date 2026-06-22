@@ -2,7 +2,7 @@ use reqwest::header::{self, HeaderMap};
 use thiserror::Error;
 use url::Url;
 
-use crate::scraper::{compatiblity::SiteScraper, convert_html_to_md};
+use crate::scraper::{ScrapeResult, compatiblity::SiteScraper, convert_html_to_md};
 
 pub struct RedditSiteScraper {
     client: reqwest::Client,
@@ -63,7 +63,7 @@ impl SiteScraper for RedditSiteScraper {
         }
     }
 
-    async fn scrape_markdown(&self, url: &Url) -> Result<String, Self::Error> {
+    async fn scrape_markdown(&self, url: &Url) -> Result<ScrapeResult, Self::Error> {
         let subreddit = RedditUrl::try_from(url)?;
         let mut url = url.clone();
         url.path_segments_mut().unwrap().push(".rss");
@@ -99,52 +99,58 @@ impl SiteScraper for RedditSiteScraper {
                 post_name: _,
             }) => {
                 let op = feed.entries().first().unwrap();
-                Ok(format!(
-                    include_str!("templates/reddit-comments.md"),
-                    feed.title.as_str(),
-                    op.authors.first().unwrap().name,
-                    feed.categories().first().unwrap().label().unwrap(),
-                    feed.updated().to_rfc2822(),
-                    get_content_as_codeblock(op),
-                    feed.entries()
-                        .iter()
-                        .skip(1)
-                        .enumerate()
-                        .map(|(number, comment)| {
-                            let content = get_content_as_codeblock(comment);
-                            format!(
-                                "{}. {} at {}\n\n{}",
-                                number,
-                                comment.authors().first().unwrap().name,
-                                comment.updated().to_rfc2822(),
-                                content
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                ))
+                Ok(ScrapeResult {
+                    title: Some(feed.title.to_string()),
+                    content: format!(
+                        include_str!("templates/reddit-comments.md"),
+                        feed.title.as_str(),
+                        op.authors.first().unwrap().name,
+                        feed.categories().first().unwrap().label().unwrap(),
+                        feed.updated().to_rfc2822(),
+                        get_content_as_codeblock(op),
+                        feed.entries()
+                            .iter()
+                            .skip(1)
+                            .enumerate()
+                            .map(|(number, comment)| {
+                                let content = get_content_as_codeblock(comment);
+                                format!(
+                                    "{}. {} at {}\n\n{}",
+                                    number,
+                                    comment.authors().first().unwrap().name,
+                                    comment.updated().to_rfc2822(),
+                                    content
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ),
+                })
             }
             None => {
                 // the url is a subreddit
-                Ok(format!(
-                    include_str!("templates/reddit-subreddit.md"),
-                    subreddit.subreddit,
-                    feed.subtitle().unwrap().to_string(),
-                    feed.entries
-                        .into_iter()
-                        .map(|post| {
-                            let content = get_content_as_codeblock(&post);
-                            format!(
-                                include_str!("templates/reddit-post.md"),
-                                post.title.value,
-                                post.authors.first().unwrap().name,
-                                post.published().unwrap().to_rfc2822(),
-                                content
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                ))
+                Ok(ScrapeResult {
+                    title: Some(format!("r/{}", subreddit.subreddit)),
+                    content: format!(
+                        include_str!("templates/reddit-subreddit.md"),
+                        subreddit.subreddit,
+                        feed.subtitle().unwrap().to_string(),
+                        feed.entries
+                            .into_iter()
+                            .map(|post| {
+                                let content = get_content_as_codeblock(&post);
+                                format!(
+                                    include_str!("templates/reddit-post.md"),
+                                    post.title.value,
+                                    post.authors.first().unwrap().name,
+                                    post.published().unwrap().to_rfc2822(),
+                                    content
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ),
+                })
             }
         }
     }

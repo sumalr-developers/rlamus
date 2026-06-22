@@ -22,8 +22,13 @@ pub enum TaskState {
     #[default]
     Init,
     Scraping,
-    Summarizing,
-    Done(SmolStr),
+    Summarizing {
+        title: Option<SmolStr>,
+    },
+    Done {
+        title: Option<SmolStr>,
+        summary: SmolStr,
+    },
     Failed(SmolStr),
 }
 
