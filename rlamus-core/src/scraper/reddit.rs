@@ -38,10 +38,14 @@ struct RedditUrl {
     section: Option<RedditUrlSection>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum RedditUrlSection {
     Comment {
         post_id: String,
         post_name: Option<String>,
+    },
+    Share {
+        hash: String,
     },
 }
 
@@ -65,11 +69,6 @@ impl SiteScraper for RedditSiteScraper {
 
     async fn scrape_markdown(&self, url: &Url) -> Result<ScrapeResult, Self::Error> {
         let subreddit = RedditUrl::try_from(url)?;
-        let mut url = url.clone();
-        url.path_segments_mut().unwrap().push(".rss");
-        let response = self.client.get(url).send().await?;
-        response.error_for_status_ref()?;
-        let feed = atom_syndication::Feed::read_from(response.bytes().await?.as_ref())?;
         fn get_content_as_codeblock(entry: &atom_syndication::Entry) -> String {
             if let Some(content) = entry.content()
                 && let Some(content_value) = content.value()
@@ -93,64 +92,107 @@ impl SiteScraper for RedditSiteScraper {
                 "".into()
             }
         }
+        async fn fetch_feed(
+            url: &Url,
+            client: reqwest::Client,
+        ) -> Result<atom_syndication::Feed, Error> {
+            let mut url = url.clone();
+            url.path_segments_mut().unwrap().push(".rss");
+            let response = client.get(url).send().await?.error_for_status()?;
+            let feed = atom_syndication::Feed::read_from(response.bytes().await?.as_ref())?;
+            Ok(feed)
+        }
+        fn comments(feed: atom_syndication::Feed) -> ScrapeResult {
+            let op = feed.entries().first().unwrap();
+            ScrapeResult {
+                title: Some(feed.title.to_string()),
+                content: format!(
+                    include_str!("templates/reddit-comments.md"),
+                    feed.title.as_str(),
+                    op.authors.first().unwrap().name,
+                    feed.categories().first().unwrap().label().unwrap(),
+                    feed.updated().to_rfc2822(),
+                    get_content_as_codeblock(op),
+                    feed.entries()
+                        .iter()
+                        .skip(1)
+                        .enumerate()
+                        .map(|(number, comment)| {
+                            let content = get_content_as_codeblock(comment);
+                            format!(
+                                "{}. {} at {}\n\n{}",
+                                number,
+                                comment.authors().first().unwrap().name,
+                                comment.updated().to_rfc2822(),
+                                content
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            }
+        }
+        fn subreddit_posts(feed: atom_syndication::Feed, subreddit: String) -> ScrapeResult {
+            ScrapeResult {
+                title: Some(format!("r/{}", subreddit)),
+                content: format!(
+                    include_str!("templates/reddit-subreddit.md"),
+                    subreddit,
+                    feed.subtitle().unwrap().to_string(),
+                    feed.entries
+                        .into_iter()
+                        .map(|post| {
+                            let content = get_content_as_codeblock(&post);
+                            format!(
+                                include_str!("templates/reddit-post.md"),
+                                post.title.value,
+                                post.authors.first().unwrap().name,
+                                post.published().unwrap().to_rfc2822(),
+                                content
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            }
+        }
+
         match subreddit.section {
             Some(RedditUrlSection::Comment {
                 post_id: _,
                 post_name: _,
             }) => {
-                let op = feed.entries().first().unwrap();
-                Ok(ScrapeResult {
-                    title: Some(feed.title.to_string()),
-                    content: format!(
-                        include_str!("templates/reddit-comments.md"),
-                        feed.title.as_str(),
-                        op.authors.first().unwrap().name,
-                        feed.categories().first().unwrap().label().unwrap(),
-                        feed.updated().to_rfc2822(),
-                        get_content_as_codeblock(op),
-                        feed.entries()
-                            .iter()
-                            .skip(1)
-                            .enumerate()
-                            .map(|(number, comment)| {
-                                let content = get_content_as_codeblock(comment);
-                                format!(
-                                    "{}. {} at {}\n\n{}",
-                                    number,
-                                    comment.authors().first().unwrap().name,
-                                    comment.updated().to_rfc2822(),
-                                    content
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    ),
-                })
+                let feed = fetch_feed(url, self.client.clone()).await?;
+                Ok(comments(feed))
+            }
+            Some(RedditUrlSection::Share { hash: _ }) => {
+                let response = self
+                    .client
+                    .head(url.clone())
+                    .send()
+                    .await?
+                    .error_for_status()?;
+                let redirect_url = response.url();
+                let subreddit = RedditUrl::try_from(redirect_url)?;
+
+                match subreddit.section {
+                    Some(RedditUrlSection::Comment {
+                        post_id: _,
+                        post_name: _,
+                    }) => {
+                        let feed = fetch_feed(url, self.client.clone()).await?;
+                        Ok(subreddit_posts(feed, subreddit.subreddit))
+                    }
+                    Some(RedditUrlSection::Share { hash: _ }) => Err(Error::CircularRedirections),
+                    None => {
+                        let feed = fetch_feed(url, self.client.clone()).await?;
+                        Ok(subreddit_posts(feed, subreddit.subreddit))
+                    }
+                }
             }
             None => {
-                // the url is a subreddit
-                Ok(ScrapeResult {
-                    title: Some(format!("r/{}", subreddit.subreddit)),
-                    content: format!(
-                        include_str!("templates/reddit-subreddit.md"),
-                        subreddit.subreddit,
-                        feed.subtitle().unwrap().to_string(),
-                        feed.entries
-                            .into_iter()
-                            .map(|post| {
-                                let content = get_content_as_codeblock(&post);
-                                format!(
-                                    include_str!("templates/reddit-post.md"),
-                                    post.title.value,
-                                    post.authors.first().unwrap().name,
-                                    post.published().unwrap().to_rfc2822(),
-                                    content
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    ),
-                })
+                let feed = fetch_feed(url, self.client.clone()).await?;
+                Ok(subreddit_posts(feed, subreddit.subreddit))
             }
         }
     }
@@ -164,6 +206,8 @@ pub enum Error {
     HttpError(#[from] reqwest::Error),
     #[error("atom error: {0}")]
     AtomError(#[from] atom_syndication::Error),
+    #[error("circular redirections")]
+    CircularRedirections,
 }
 
 #[derive(Debug, Error)]
@@ -189,7 +233,7 @@ impl TryFrom<&Url> for RedditUrl {
             return Err(ParseRedditUrlError::UnknownHost(host.into()));
         }
 
-        // 'https://www.reddit.com/r/neovim/.rss
+        // https://www.reddit.com/r/neovim/
         let Some(mut segs) = value.path_segments() else {
             return Err(ParseRedditUrlError::InvalidPath);
         };
@@ -210,7 +254,7 @@ impl TryFrom<&Url> for RedditUrl {
         };
         match section {
             "comments" => {
-                // 'https://www.reddit.com/r/neovim/comments/1ub8t5x/display_svg_icons_in_your_file_tree/.rss'
+                // 'https://www.reddit.com/r/neovim/comments/1ub8t5x/display_svg_icons_in_your_file_tree/'
                 let Some(post_id) = segs.next() else {
                     return Err(ParseRedditUrlError::MissingPathSegment("post id"));
                 };
@@ -231,6 +275,21 @@ impl TryFrom<&Url> for RedditUrl {
                     }),
                 });
             }
+            "s" => {
+                let Some(hash) = segs.next() else {
+                    return Err(ParseRedditUrlError::MissingPathSegment("hash"));
+                };
+                return Ok(Self {
+                    subreddit: subreddit.into(),
+                    section: Some(RedditUrlSection::Share { hash: hash.into() }),
+                });
+            }
+            "" => {
+                return Ok(Self {
+                    subreddit: subreddit.into(),
+                    section: None,
+                });
+            }
             _ => return Err(ParseRedditUrlError::UnsupportedSection(section.into())),
         }
     }
@@ -241,5 +300,48 @@ impl TryFrom<Url> for RedditUrl {
 
     fn try_from(value: Url) -> Result<Self, Self::Error> {
         Self::try_from(&value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn neovim_comments() {
+        let url = Url::parse(
+            "https://www.reddit.com/r/neovim/comments/1ub8t5x/display_svg_icons_in_your_file_tree/",
+        )
+        .unwrap();
+        let reddit: RedditUrl = url.try_into().unwrap();
+        assert_eq!(reddit.subreddit, "neovim");
+        assert_eq!(
+            reddit.section,
+            Some(RedditUrlSection::Comment {
+                post_id: "1ub8t5x".into(),
+                post_name: Some("display_svg_icons_in_your_file_tree".into())
+            })
+        );
+    }
+
+    #[test]
+    fn neovim() {
+        let url = Url::parse("https://www.reddit.com/r/neovim/").unwrap();
+        let reddit: RedditUrl = url.try_into().unwrap();
+        assert_eq!(reddit.subreddit, "neovim");
+        assert_eq!(reddit.section, None);
+    }
+
+    #[test]
+    fn rust_comments() {
+        let url = Url::parse("https://www.reddit.com/r/rust/s/QWqXrqVapJ").unwrap();
+        let reddit: RedditUrl = url.try_into().unwrap();
+        assert_eq!(reddit.subreddit, "rust");
+        assert_eq!(
+            reddit.section,
+            Some(RedditUrlSection::Share {
+                hash: "QWqXrqVapJ".into()
+            })
+        );
     }
 }
