@@ -48,7 +48,7 @@ async fn main() {
         .get_markdown_uncropped(url)
         .await
         .expect("Read URL failed");
-    event!(Level::TRACE, "document: {doc}");
+    event!(Level::TRACE, "document: {}", doc.content);
     let summarizer = Summarize::new(runner);
     let summary = summarizer
         .summarize(&doc.content)

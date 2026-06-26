@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use reqwest::header::{self, HeaderMap};
 use thiserror::Error;
 use url::Url;
@@ -97,8 +99,26 @@ impl SiteScraper for RedditSiteScraper {
             client: reqwest::Client,
         ) -> Result<atom_syndication::Feed, Error> {
             let mut url = url.clone();
-            url.path_segments_mut().unwrap().push(".rss");
-            let response = client.get(url).send().await?.error_for_status()?;
+            url.set_query(None);
+            {
+                let mut path_segments = url.path_segments_mut().unwrap();
+                path_segments.pop_if_empty();
+                path_segments.push(".rss");
+            }
+            tracing::trace!("fetching Reddit RSS feed from {url}");
+            let mut response: reqwest::Response;
+            loop {
+                response = client.get(url.clone()).send().await?;
+                if response.status().is_success() {
+                    break;
+                }
+                if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    tracing::warn!("feed scrapping got rate limited, retrying in 10 seconds");
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                } else {
+                    response.error_for_status_ref()?;
+                }
+            }
             let feed = atom_syndication::Feed::read_from(response.bytes().await?.as_ref())?;
             Ok(feed)
         }
@@ -109,7 +129,10 @@ impl SiteScraper for RedditSiteScraper {
                 content: format!(
                     include_str!("templates/reddit-comments.md"),
                     feed.title.as_str(),
-                    op.authors.first().unwrap().name,
+                    op.authors
+                        .first()
+                        .map(|their| their.name())
+                        .unwrap_or("unknown"),
                     feed.categories().first().unwrap().label().unwrap(),
                     feed.updated().to_rfc2822(),
                     get_content_as_codeblock(op),
@@ -122,7 +145,11 @@ impl SiteScraper for RedditSiteScraper {
                             format!(
                                 "{}. {} at {}\n\n{}",
                                 number,
-                                comment.authors().first().unwrap().name,
+                                comment
+                                    .authors()
+                                    .first()
+                                    .map(|their| their.name())
+                                    .unwrap_or("unknown"),
                                 comment.updated().to_rfc2822(),
                                 content
                             )
@@ -146,7 +173,10 @@ impl SiteScraper for RedditSiteScraper {
                             format!(
                                 include_str!("templates/reddit-post.md"),
                                 post.title.value,
-                                post.authors.first().unwrap().name,
+                                post.authors
+                                    .first()
+                                    .map(|their| their.name())
+                                    .unwrap_or("unknown"),
                                 post.published().unwrap().to_rfc2822(),
                                 content
                             )
@@ -172,8 +202,9 @@ impl SiteScraper for RedditSiteScraper {
                     .send()
                     .await?
                     .error_for_status()?;
-                let redirect_url = response.url();
-                let subreddit = RedditUrl::try_from(redirect_url)?;
+                let url = response.url();
+                tracing::debug!("share link redirected to {url}");
+                let subreddit = RedditUrl::try_from(url)?;
 
                 match subreddit.section {
                     Some(RedditUrlSection::Comment {
@@ -181,7 +212,7 @@ impl SiteScraper for RedditSiteScraper {
                         post_name: _,
                     }) => {
                         let feed = fetch_feed(url, self.client.clone()).await?;
-                        Ok(subreddit_posts(feed, subreddit.subreddit))
+                        Ok(comments(feed))
                     }
                     Some(RedditUrlSection::Share { hash: _ }) => Err(Error::CircularRedirections),
                     None => {
