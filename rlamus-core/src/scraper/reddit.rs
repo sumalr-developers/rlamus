@@ -1,10 +1,17 @@
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, HashMap},
+    str::FromStr,
+    time::Duration,
+};
 
-use reqwest::header::{self, HeaderMap};
+use reqwest::header::{self, HeaderMap, HeaderName};
 use thiserror::Error;
 use url::Url;
 
-use crate::scraper::{ScrapeResult, compatiblity::SiteScraper, convert_html_to_md};
+use crate::{
+    environ,
+    scraper::{ScrapeResult, compatiblity::SiteScraper, convert_html_to_md},
+};
 
 pub struct RedditSiteScraper {
     client: reqwest::Client,
@@ -18,14 +25,32 @@ impl RedditSiteScraper {
 
 impl Default for RedditSiteScraper {
     fn default() -> Self {
-        let headers: HeaderMap = [(
-            header::USER_AGENT,
-            concat!("server:rlamus:", env!("CARGO_PKG_VERSION"))
-                .parse()
-                .unwrap(),
-        )]
-        .into_iter()
-        .collect();
+        let headers: HeaderMap = if let Some(headers_str) = std::env::var_os("REDDIT_HEADERS") {
+            let headers_kv: BTreeMap<String, String> = environ::from_os_str(&headers_str)
+                .map_err(|err| err.to_string())
+                .and_then(|s| toml::from_str(&s).map_err(|err| err.to_string()))
+                .expect("REDDIT_HEADERS is not nor does it refer to a valid TOML document");
+            headers_kv
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        k.parse()
+                            .expect(format!("{k} is not a valid header name").as_str()),
+                        v.parse()
+                            .expect(format!("{v} is not a valid header value").as_str()),
+                    )
+                })
+                .collect()
+        } else {
+            [(
+                header::USER_AGENT,
+                concat!("server:rlamus:", env!("CARGO_PKG_VERSION"))
+                    .parse()
+                    .unwrap(),
+            )]
+            .into_iter()
+            .collect()
+        };
         Self {
             client: reqwest::Client::builder()
                 .default_headers(headers)
