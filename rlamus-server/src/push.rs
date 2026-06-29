@@ -4,10 +4,11 @@ use apns_h2::{DefaultNotificationBuilder, NotificationBuilder, NotificationOptio
 
 use crate::task::Task;
 
-pub async fn apn_completion(
+pub async fn apn_state_change(
     task: &Task,
     client: &apns_h2::Client,
     device_token: impl AsRef<str>,
+    topic: Option<impl AsRef<str>>,
 ) -> Result<(), apns_h2::Error> {
     match task.state.clone() {
         crate::task::TaskState::Init => {}
@@ -26,15 +27,20 @@ pub async fn apn_completion(
                 builder = builder.subtitle_loc_key("RECENT_TASK_DONE");
             }
             builder = builder.subtitle_loc_args(&args);
-            client
-                .send(builder.build(
-                    device_token.as_ref(),
-                    NotificationOptions {
-                        apns_push_type: Some(PushType::Alert),
-                        ..Default::default()
-                    },
-                ))
-                .await?;
+
+            let mut payload = builder.build(
+                device_token.as_ref(),
+                NotificationOptions {
+                    apns_push_type: Some(PushType::Alert),
+                    apns_topic: topic.as_ref().map(|it| it.as_ref()),
+                    ..Default::default()
+                },
+            );
+            payload
+                .add_custom_data("task-id", &task.id.to_string())
+                .unwrap();
+
+            client.send(payload).await?;
         }
         crate::task::TaskState::Failed(smol_str) => {}
     }

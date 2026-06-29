@@ -209,10 +209,16 @@ where
                 };
                 if let Some(client) = app.apn_client.clone()
                     && let Some(device_token) = input.apn_device_token
+                    && let Some(topic) = input.apn_topic
                 {
-                    _ = push::apn_completion(&task, &client, device_token)
+                    tracing::trace!("push APN");
+                    _ = push::apn_state_change(&task, &client, &device_token, Some(&topic))
                         .await
-                        .inspect_err(|err| tracing::error!("unable to push APN: {err}"));
+                        .inspect_err(|err| {
+                            tracing::error!({ topic = topic, device_token = device_token }, "unable to push APN: {err}")
+                        });
+                } else {
+                    tracing::trace!("no APN configured, skipping");
                 }
             }
             Err(err) => {
@@ -291,6 +297,8 @@ struct CreateTask {
     url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     apn_device_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apn_topic: Option<String>,
 }
 
 struct CreateTaskSuccess {

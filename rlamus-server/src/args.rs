@@ -27,6 +27,7 @@ pub struct Apn {
     #[command(flatten)]
     pub token: Option<ApnToken>,
 
+    /// Use sandbox environment instead of production
     #[arg(long, default_value_t = false)]
     pub apn_sandbox: bool,
 }
