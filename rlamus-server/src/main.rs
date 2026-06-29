@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     convert::Infallible,
     fmt::{Debug, Display},
     future,
@@ -6,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use anyhow::anyhow;
 use axum::{
     Form, Json, Router,
     extract::{Path, State},
@@ -13,9 +15,10 @@ use axum::{
     response::{IntoResponse, Response, Sse, sse},
     routing::{delete, get, post},
 };
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use futures::{Stream, StreamExt};
 use rlamus_core::{
+    environ,
     ollama::OllamaRunner,
     scraper::{
         Scraper,
@@ -34,6 +37,7 @@ use crate::{
 };
 
 mod args;
+mod push;
 mod task;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -52,9 +56,19 @@ async fn main() {
     let (app, state) = init(
         CachedRegistry::new(FsRegistry::new(&args.data_dir)),
         BrowserConfig::builder()
-            .chrome_executable(
-                std::env::var("CHROMIUM_BIN").expect("Missing CHROMIUM_BIN environment variable"),
-            )
+            .chrome_executable({
+                let Some(path) = args
+                    .chromium_binary
+                    .and_then(|path| path.to_str().map(|s| s.to_owned()))
+                    .or_else(|| std::env::var("CHROMIUM_BIN").ok())
+                else {
+                    let mut args = Args::command();
+                    args.error(clap::error::ErrorKind::MissingRequiredArgument,
+                        "Missing --chromium-bin CLI argument and CHROMIUM_BIN environment variable. Speicify one")
+                        .exit();
+                };
+                path
+            })
             .viewport(Some(Viewport {
                 width: 1280,
                 height: 1280,
@@ -66,6 +80,7 @@ async fn main() {
             .build()
             .unwrap(),
         OllamaRunner::default(),
+        args.apn
     )
     .await
     .expect("Init app error");
@@ -83,21 +98,62 @@ struct AppState<R> {
     registry: R,
     scraper: Scraper,
     summarizer: Summarize,
+    apn_client: Option<Arc<apns_h2::Client>>,
 }
 
 async fn init<R>(
     tasks: R,
     browser: BrowserConfig,
     ollama: OllamaRunner,
+    apn: args::Apn,
 ) -> anyhow::Result<(Router, Arc<AppState<R>>)>
 where
     R: TaskRegistry + Send + Sync + 'static,
     R::Error: IntoResponse + Send + Display,
 {
+    use apns_h2::ClientConfig;
+    let apn_config = ClientConfig::new(if apn.apn_sandbox {
+        apns_h2::Endpoint::Sandbox
+    } else {
+        apns_h2::Endpoint::Production
+    });
+    let apn_client = match (apn.certificate, apn.token) {
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!(),
+        (None, Some(token)) => {
+            use apns_h2::Client;
+            use std::fs::File;
+            Some(Client::token(
+                File::open(token.apn_p8)?,
+                token.apn_p8_key_id,
+                token.apn_p8_team_id,
+                apn_config,
+            )?)
+        }
+        (Some(cert), None) => {
+            use apns_h2::Client;
+            use std::fs::File;
+            let env_password = std::env::var_os("APN_P12_PASSWORD");
+            let password = env_password
+                .as_ref()
+                .map(|s| environ::from_os_str(s).map_err(|err| anyhow!(err)))
+                .unwrap_or_else(|| {
+                    cert.apn_p12_password
+                        .map(Cow::Owned)
+                        .ok_or(anyhow!("Missing --apn-p12-password and APN_P12_PASSWORD environment variable. Specific one"))
+                })?;
+            Some(Client::certificate(
+                &mut File::open(cert.apn_p12)?,
+                &password,
+                apn_config,
+            )?)
+        }
+    };
     let state = Arc::new(AppState {
         registry: tasks,
         scraper: Scraper::launch_browser(browser, ollama.clone()).await?,
         summarizer: Summarize::new(ollama),
+        apn_client: apn_client.map(Arc::new),
     });
     Ok((
         Router::new()
@@ -151,6 +207,13 @@ where
                     title,
                     summary: summary.into(),
                 };
+                if let Some(client) = app.apn_client.clone()
+                    && let Some(device_token) = input.apn_device_token
+                {
+                    _ = push::apn_completion(&task, &client, device_token)
+                        .await
+                        .inspect_err(|err| tracing::error!("unable to push APN: {err}"));
+                }
             }
             Err(err) => {
                 task.state = TaskState::Failed(format!("Summarization failed: {err}").into());
@@ -226,6 +289,8 @@ where
 #[derive(Debug, Deserialize)]
 struct CreateTask {
     url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apn_device_token: Option<String>,
 }
 
 struct CreateTaskSuccess {
