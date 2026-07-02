@@ -1,13 +1,8 @@
-use std::time::Duration;
-
-use rustypipe::{client::RustyPipe, error, model::richtext::ToMarkdown};
+use rustypipe::{client::RustyPipe, model::richtext::ToMarkdown};
 use thiserror::Error;
 use url::Url;
 
-use crate::scraper::{
-    ScrapeResult,
-    compatiblity::{CompatibilityLayer, SiteScraper},
-};
+use crate::scraper::{ScrapeResult, compatiblity::SiteScraper};
 
 pub struct YouTubeSiteScraper {
     rp: RustyPipe,
@@ -53,30 +48,35 @@ impl SiteScraper for YouTubeSiteScraper {
                     .iter()
                     .find(|it| it.lang_name == primary_language_name)
             })
-            .or_else(|| player.subtitles.first())
-            .ok_or(Error::MissingSubtitle)?;
+            .or_else(|| player.subtitles.first());
 
-        let respone = self
-            .http
-            .get({
-                let mut url = Url::parse(&subtitle.url).unwrap();
-                url.query_pairs_mut().append_pair("fmt", "vtt");
-                url
-            })
-            .send()
-            .await?
-            .error_for_status()?;
-        let subtitle_content = respone
-            .text()
-            .await?
-            .split("\n")
-            .fold("".to_string(), |acc, x| {
-                if acc.len() + x.len() < 50_000 {
-                    format!("{acc}\n{x}")
-                } else {
-                    acc
-                }
-            });
+        let subtitle_content = if let Some(subtitle) = subtitle {
+            let respone = self
+                .http
+                .get({
+                    let mut url = Url::parse(&subtitle.url).unwrap();
+                    url.query_pairs_mut().append_pair("fmt", "vtt");
+                    url
+                })
+                .send()
+                .await?
+                .error_for_status()?;
+            Some(
+                respone
+                    .text()
+                    .await?
+                    .split("\n")
+                    .fold("".to_string(), |acc, x| {
+                        if acc.len() + x.len() < 50_000 {
+                            format!("{acc}\n{x}")
+                        } else {
+                            acc
+                        }
+                    }),
+            )
+        } else {
+            None
+        };
         let video_details = self.rp.query().video_details(&id).await?;
         let duration = {
             let mut seconds = player.details.duration;
@@ -109,7 +109,7 @@ impl SiteScraper for YouTubeSiteScraper {
                 duration,
                 video_details.name,
                 video_details.description.to_markdown(),
-                subtitle_content,
+                subtitle_content.unwrap_or_default(),
             ),
         })
     }
@@ -123,8 +123,6 @@ pub enum Error {
     UnsupportedUrl,
     #[error("player: {0}")]
     RustyPipe(#[from] rustypipe::error::Error),
-    #[error("missing subtitle")]
-    MissingSubtitle,
     #[error("fetching subtitle: {0}")]
     FetchingSubtitle(#[from] reqwest::Error),
 }
