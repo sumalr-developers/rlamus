@@ -5,7 +5,7 @@ use thiserror::Error;
 use tracing::{Instrument, debug_span};
 use url::Url;
 
-use crate::scraper::{ScrapeResult, reddit::RedditSiteScraper};
+use crate::scraper::{ScrapeResult, reddit::RedditSiteScraper, youtube::YouTubeSiteScraper};
 
 trait SiteScraperHolder: Send + Sync {
     fn can_handle(&self, url: &Url) -> bool;
@@ -70,10 +70,16 @@ impl CompatibilityLayer {
 impl Default for CompatibilityLayer {
     fn default() -> Self {
         Self {
-            scrapers: vec![(
-                ScraperInfo::new::<RedditSiteScraper>(),
-                Box::new(RedditSiteScraper::default()),
-            )],
+            scrapers: vec![
+                (
+                    ScraperInfo::new::<RedditSiteScraper>(),
+                    Box::new(RedditSiteScraper::default()),
+                ),
+                (
+                    ScraperInfo::new::<YouTubeSiteScraper>(),
+                    Box::new(YouTubeSiteScraper::new()),
+                ),
+            ],
         }
     }
 }

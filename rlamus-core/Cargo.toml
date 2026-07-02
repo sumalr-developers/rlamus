@@ -22,3 +22,4 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 reqwest = { version = "0.13", features = ["json"] }
 atom_syndication = "0.12.8"
 toml = "1.1.2"
+rustypipe = "0.11.4"

@@ -1,6 +1,7 @@
 pub mod compatiblity;
 pub mod reddit;
 pub mod scraper;
+pub mod youtube;
 
 use html_to_markdown_rs::{ConversionOptions, LinkStyle};
 
