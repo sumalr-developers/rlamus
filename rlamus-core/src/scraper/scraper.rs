@@ -145,6 +145,20 @@ impl Scraper {
                 }
             }
         }
+        // Prioritize *the* main tag
+        if let Ok(main_tags) = page.find_elements("main").await
+            && main_tags.len() == 1
+        {
+            let tag = main_tags.first().unwrap();
+            let content = tag.inner_html().await?;
+            if let Some(content) = content {
+                let markdown = convert_html_to_md(&content)?;
+                return Ok(ScrapeResult {
+                    content: markdown,
+                    title: page_title,
+                });
+            }
+        }
 
         let font = FontRef::try_from_slice(include_bytes!("MapleMono-Bold.otf")).unwrap();
         for iter_num in 0..self.max_iterations {
