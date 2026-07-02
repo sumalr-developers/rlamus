@@ -68,7 +68,11 @@ impl SiteScraper for YouTubeSiteScraper {
                     .split("\n")
                     .fold("".to_string(), |acc, x| {
                         if acc.len() + x.len() < 50_000 {
-                            format!("{acc}\n{x}")
+                            if acc.ends_with("\n") {
+                                format!("{acc}{x}")
+                            } else {
+                                format!("{acc}\n{x}")
+                            }
                         } else {
                             acc
                         }
