@@ -152,6 +152,7 @@ impl Scraper {
             let tag = main_tags.first().unwrap();
             let content = tag.inner_html().await?;
             if let Some(content) = content {
+                tracing::trace!("using <main> tag");
                 let markdown = convert_html_to_md(&content)?;
                 return Ok(ScrapeResult {
                     content: markdown,
