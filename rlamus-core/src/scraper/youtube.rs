@@ -27,14 +27,16 @@ impl SiteScraper for YouTubeSiteScraper {
 
     fn can_handle(&self, url: &url::Url) -> bool {
         match YouTubeUrl::try_from(url) {
-            Ok(YouTubeUrl::Video { id: _ }) => true,
+            Ok(YouTubeUrl::Video { id: _ } | YouTubeUrl::Short { id: _ }) => true,
             _ => false,
         }
     }
 
     async fn scrape_markdown(&self, url: &url::Url) -> Result<super::ScrapeResult, Self::Error> {
-        let YouTubeUrl::Video { id } = YouTubeUrl::try_from(url)? else {
-            return Err(Error::UnsupportedUrl);
+        let id = match YouTubeUrl::try_from(url)? {
+            YouTubeUrl::Video { id } => id,
+            YouTubeUrl::Short { id } => id,
+            _ => return Err(Error::UnsupportedUrl),
         };
 
         let player = self.rp.query().player(&id).await?;
@@ -134,6 +136,7 @@ pub enum Error {
 #[derive(Debug, PartialEq, Eq)]
 enum YouTubeUrl {
     Video { id: String },
+    Short { id: String },
     Root,
 }
 
@@ -143,6 +146,8 @@ pub enum ParseYouTubeUrlError {
     UnknownHost(String),
     #[error("missing parameter {0}")]
     MissingParameter(&'static str),
+    #[error("missing path segment")]
+    MissingPathSegment,
 }
 
 impl TryFrom<&url::Url> for YouTubeUrl {
@@ -164,6 +169,12 @@ impl TryFrom<&url::Url> for YouTubeUrl {
                             return Err(ParseYouTubeUrlError::MissingParameter("v"));
                         };
                         return Ok(Self::Video { id: vid.into() });
+                    }
+                    Some("shorts") => {
+                        let Some(vid) = paths.next() else {
+                            return Err(ParseYouTubeUrlError::MissingPathSegment);
+                        };
+                        return Ok(Self::Short { id: vid.into() });
                     }
                     _ => return Ok(Self::Root),
                 }
