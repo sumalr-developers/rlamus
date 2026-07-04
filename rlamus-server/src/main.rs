@@ -161,7 +161,9 @@ where
         summarizer: Summarize::new(ollama),
         apn_client: apn_client.map(Arc::new),
     });
-    state.expire.lock().await.start().await?;
+    if let Err(err) = state.expire.lock().await.start().await {
+        tracing::error!("failed to start expirer: {err}");
+    }
     Ok((
         Router::new()
             .route("/", get(root_handler))
