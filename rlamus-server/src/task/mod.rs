@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 mod cached_registry;
 mod fs_registry;
+pub mod expire;
 
 pub use cached_registry::CachedRegistry;
 pub use fs_registry::FsRegistry;

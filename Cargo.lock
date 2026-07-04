@@ -3313,6 +3313,7 @@ dependencies = [
  "smol_str",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "trait-variant",
@@ -4192,6 +4193,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

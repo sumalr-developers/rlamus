@@ -3,6 +3,7 @@ use std::{
     convert::Infallible,
     fmt::{Debug, Display},
     future,
+    ops::DerefMut,
     sync::Arc,
     time::Duration,
 };
@@ -28,12 +29,13 @@ use rlamus_core::{
 };
 use serde::Deserialize;
 use smol_str::ToSmolStr;
+use tokio::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
 use crate::{
     args::Args,
-    task::{CachedRegistry, FsRegistry, Task, TaskRegistry, TaskState},
+    task::{CachedRegistry, FsRegistry, Task, TaskRegistry, TaskState, expire::Expire},
 };
 
 mod args;
@@ -94,8 +96,9 @@ async fn main() {
         .unwrap();
 }
 
-struct AppState<R> {
-    registry: R,
+struct AppState<R: TaskRegistry> {
+    registry: Arc<R>,
+    expire: Mutex<Expire<R>>,
     scraper: Scraper,
     summarizer: Summarize,
     apn_client: Option<Arc<apns_h2::Client>>,
@@ -109,7 +112,7 @@ async fn init<R>(
 ) -> anyhow::Result<(Router, Arc<AppState<R>>)>
 where
     R: TaskRegistry + Send + Sync + 'static,
-    R::Error: IntoResponse + Send + Display,
+    R::Error: IntoResponse + Send + Sync + std::error::Error,
 {
     use apns_h2::ClientConfig;
     let apn_config = ClientConfig::new(if apn.apn_sandbox {
@@ -149,12 +152,16 @@ where
             )?)
         }
     };
+    let registry = Arc::new(tasks);
     let state = Arc::new(AppState {
-        registry: tasks,
+        registry: Arc::clone(&registry),
+        // tasks expire in 4 hours
+        expire: Mutex::new(Expire::new(registry, Duration::from_secs(60 * 60 * 4))),
         scraper: Scraper::launch_browser(browser, ollama.clone()).await?,
         summarizer: Summarize::new(ollama),
         apn_client: apn_client.map(Arc::new),
     });
+    state.expire.lock().await.start().await?;
     Ok((
         Router::new()
             .route("/", get(root_handler))
@@ -177,20 +184,20 @@ async fn task_create_handler<R>(
 ) -> Result<CreateTaskSuccess, R::Error>
 where
     R: TaskRegistry + Send + Sync + 'static,
-    R::Error: IntoResponse + Display,
+    R::Error: IntoResponse + Display + Send,
 {
     let mut task = Task::new(input.url.clone());
     let task_id = task.id.clone();
     app.registry.insert(task.clone()).await?;
     tokio::spawn(async move {
         task.state = TaskState::Scraping;
-        update_task_in_registry(task.clone(), &app.registry).await;
+        update_task_in_registry(task.clone(), app.registry.as_ref(), app.expire.lock().await).await;
 
         let doc = match app.scraper.get_markdown_uncropped(input.url).await {
             Ok(doc) => doc,
             Err(err) => {
                 task.state = TaskState::Failed(format!("Page scraping failed: {err}").into());
-                update_task_in_registry(task, &app.registry).await;
+                update_task_in_registry(task, app.registry.as_ref(), app.expire.lock().await).await;
                 return;
             }
         };
@@ -199,7 +206,7 @@ where
         task.state = TaskState::Summarizing {
             title: title.clone(),
         };
-        update_task_in_registry(task.clone(), &app.registry).await;
+        update_task_in_registry(task.clone(), app.registry.as_ref(), app.expire.lock().await).await;
         let summary = app.summarizer.summarize(&doc.content).await;
         match summary {
             Ok(summary) => {
@@ -225,18 +232,22 @@ where
                 task.state = TaskState::Failed(format!("Summarization failed: {err}").into());
             }
         }
-        update_task_in_registry(task, &app.registry).await;
+        update_task_in_registry(task, app.registry.as_ref(), app.expire.lock().await).await;
     });
     Ok(CreateTaskSuccess {
         task_id: task_id.clone(),
     })
 }
 
-async fn update_task_in_registry<R>(task: Task, registry: &R)
-where
-    R: TaskRegistry,
-    R::Error: Display,
+async fn update_task_in_registry<R>(
+    task: Task,
+    registry: &R,
+    mut expire: impl DerefMut<Target = Expire<R>>,
+) where
+    R: TaskRegistry + Sync + 'static,
+    R::Error: Display + Send + 'static,
 {
+    expire.deref_mut().insert(task.id).await;
     _ = registry
         .insert(task)
         .await
@@ -248,10 +259,14 @@ async fn task_get_handler<R>(
     Path(id): Path<Uuid>,
 ) -> Result<GetTask, R::Error>
 where
-    R: TaskRegistry,
-    R::Error: IntoResponse,
+    R: TaskRegistry + Sync + 'static,
+    R::Error: IntoResponse + Send,
 {
-    Ok(app.registry.get(&id).await?.into())
+    let task = app.registry.get(&id).await?;
+    if let Some(task) = task.as_ref() {
+        app.expire.lock().await.insert(task.id).await;
+    }
+    Ok(task.into())
 }
 
 async fn task_delete_handler<R>(
@@ -259,10 +274,14 @@ async fn task_delete_handler<R>(
     Path(id): Path<Uuid>,
 ) -> Result<DeleteTask, R::Error>
 where
-    R: TaskRegistry,
-    R::Error: IntoResponse,
+    R: TaskRegistry + Sync + 'static,
+    R::Error: IntoResponse + Sync + Send,
 {
-    Ok(app.registry.remove(&id).await?.into())
+    let task = app.registry.remove(&id).await?;
+    if let Some(task) = task.as_ref() {
+        app.expire.lock().await.remove(&task.id).await;
+    }
+    Ok(task.into())
 }
 
 async fn task_sse_get_handler<R>(
@@ -270,14 +289,17 @@ async fn task_sse_get_handler<R>(
     Path(id): Path<Uuid>,
 ) -> Sse<impl Stream<Item = Result<sse::Event, Infallible>>>
 where
-    R: TaskRegistry + 'static,
-    R::Error: IntoResponse + Send,
+    R: TaskRegistry + Send + Sync + 'static,
+    R::Error: IntoResponse + Send + 'static,
 {
     let current = app.registry.get(&id).await;
+    if let Ok(Some(task)) = current.as_ref() {
+        app.expire.lock().await.insert(task.id).await;
+    }
     let stream = futures::stream::once(future::ready(current))
         .filter_map(async |it| it.ok().flatten())
         .chain(app.registry.changes_on(id))
-        .map(|task| {
+        .then(async |task| {
             sse::Event::default()
                 .event("update")
                 .json_data(task)
@@ -402,7 +424,7 @@ async fn shutdown_handler(state: impl Shutdown) {
 impl<R> Shutdown for Arc<AppState<CachedRegistry<R>>>
 where
     R: TaskRegistry + Send + Sync,
-    R::Error: Display + Debug,
+    R::Error: Display + Debug + Send + Sync,
 {
     async fn shutdown(&self) {
         match tokio::time::timeout(Duration::from_secs(5), self.registry.flush()).await {
