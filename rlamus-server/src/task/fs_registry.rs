@@ -66,7 +66,7 @@ impl TaskRegistry for FsRegistry {
                 if !path.is_file() || !path.extension().is_some_and(|ext| ext == "json") {
                     continue;
                 }
-                let task = serde_json::from_slice(tokio::fs::read(path).await?.as_slice()).unwrap();
+                let task = serde_json::from_slice(tokio::fs::read(path).await?.as_slice())?;
                 yield task;
             }
         }
