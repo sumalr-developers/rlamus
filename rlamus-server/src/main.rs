@@ -493,7 +493,7 @@ impl IntoResponse for PatchTaskResponse {
                 .body("Task not found".into())
                 .unwrap(),
             PatchTaskResponse::Patched => Response::builder()
-                .status(StatusCode::OK)
+                .status(StatusCode::ACCEPTED)
                 .body("Task patched".into())
                 .unwrap(),
         }
