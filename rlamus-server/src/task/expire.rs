@@ -52,6 +52,12 @@ where
         Ok(())
     }
 
+    pub async fn stop(&mut self) {
+        while let Some((_, handle)) = self.timers.pop_first() {
+            handle.abort();
+        }
+    }
+
     pub async fn insert(&mut self, task_id: Uuid) -> InsertResult {
         let timeout = self.timeout;
         let registry = Arc::clone(&self.registry);

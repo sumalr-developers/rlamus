@@ -3,7 +3,6 @@ use std::{
     convert::Infallible,
     fmt::{Debug, Display},
     future,
-    ops::DerefMut,
     sync::Arc,
     time::Duration,
 };
@@ -96,12 +95,17 @@ async fn main() {
         .unwrap();
 }
 
+/// Stateful
 struct AppState<R: TaskRegistry> {
     registry: Arc<R>,
     expire: Mutex<Expire<R>>,
+}
+
+/// Stateless
+struct AppFoundation {
     scraper: Scraper,
     summarizer: Summarize,
-    apn_client: Option<Arc<apns_h2::Client>>,
+    apn_client: Option<apns_h2::Client>,
 }
 
 async fn init<R>(
@@ -153,17 +157,22 @@ where
         }
     };
     let registry = Arc::new(tasks);
+    let mut expire = Expire::new(registry.clone(), Duration::from_secs(60 * 60 * 4));
+
+    if let Err(err) = expire.start().await {
+        tracing::error!("failed to start expirer: {err}");
+    }
+
     let state = Arc::new(AppState {
         registry: Arc::clone(&registry),
         // tasks expire in 4 hours
-        expire: Mutex::new(Expire::new(registry, Duration::from_secs(60 * 60 * 4))),
+        expire: Mutex::new(expire),
+    });
+    let foundation = Arc::new(AppFoundation {
         scraper: Scraper::launch_browser(browser, ollama.clone()).await?,
         summarizer: Summarize::new(ollama),
-        apn_client: apn_client.map(Arc::new),
+        apn_client: apn_client,
     });
-    if let Err(err) = state.expire.lock().await.start().await {
-        tracing::error!("failed to start expirer: {err}");
-    }
     Ok((
         Router::new()
             .route("/", get(root_handler))
@@ -171,93 +180,124 @@ where
             .route("/task/{id}", get(task_get_handler))
             .route("/task/{id}", delete(task_delete_handler))
             .route("/task/{id}/sse", get(task_sse_get_handler))
-            .with_state(Arc::clone(&state)),
+            .with_state((Arc::clone(&state), Arc::clone(&foundation))),
         state,
     ))
 }
+
+async fn run_task<F>(input: CreateTask, app: Arc<AppFoundation>, set_state: F)
+where
+    F: AsyncFn(TaskState) -> (),
+{
+    set_state(TaskState::Scraping).await;
+
+    let doc = match app.scraper.get_markdown_uncropped(input.url).await {
+        Ok(doc) => doc,
+        Err(err) => {
+            set_state(TaskState::Failed(
+                format!("Page scraping failed: {err}").into(),
+            ))
+            .await;
+            return;
+        }
+    };
+
+    let title = doc.title.map(|it| it.to_smolstr());
+    set_state(TaskState::Summarizing {
+        title: title.clone(),
+    })
+    .await;
+    let summary = app.summarizer.summarize(&doc.content).await;
+    match summary {
+        Ok(summary) => {
+            set_state(TaskState::Done {
+                title,
+                summary: summary.into(),
+            })
+            .await;
+        }
+        Err(err) => {
+            set_state(TaskState::Failed(
+                format!("Summarization failed: {err}").into(),
+            ))
+            .await;
+        }
+    }
+}
+
+async fn update_task_state<R>(
+    task: Task,
+    input: &CreateTask,
+    state: &AppState<R>,
+    foundation: &AppFoundation,
+) where
+    R: TaskRegistry + Sync + 'static,
+    R::Error: Display + Send + 'static,
+{
+    state.expire.lock().await.insert(task.id).await;
+    if let Some(client) = foundation.apn_client.as_ref()
+        && let Some(device_token) = input.apn_device_token.as_ref()
+        && let Some(topic) = input.apn_topic.as_ref()
+    {
+        tracing::trace!("push APN");
+        _ = push::apn_state_change(&task, client, device_token, Some(topic))
+                        .await
+                        .inspect_err(|err| {
+                            tracing::error!({ topic = topic, device_token = device_token }, "unable to push APN: {err}")
+                        });
+    } else {
+        tracing::trace!("no APN configured, skipping");
+    }
+
+    _ = state
+        .registry
+        .insert(task)
+        .await
+        .inspect_err(|err| tracing::error!("failed to update task state: {err}"));
+}
+
+// ---- Handlers ----
 
 async fn root_handler() -> &'static str {
     "rlamus-server api:1"
 }
 
 async fn task_create_handler<R>(
-    State(app): State<Arc<AppState<R>>>,
+    State((app, foundation)): State<(Arc<AppState<R>>, Arc<AppFoundation>)>,
     Form(input): Form<CreateTask>,
 ) -> Result<CreateTaskSuccess, R::Error>
 where
     R: TaskRegistry + Send + Sync + 'static,
     R::Error: IntoResponse + Display + Send,
 {
-    let mut task = Task::new(input.url.clone());
+    let task = Task::new(input.url.clone());
     let task_id = task.id.clone();
-    app.registry.insert(task.clone()).await?;
-    tokio::spawn(async move {
-        task.state = TaskState::Scraping;
-        update_task_in_registry(task.clone(), app.registry.as_ref(), app.expire.lock().await).await;
+    app.registry.insert(task).await?;
 
-        let doc = match app.scraper.get_markdown_uncropped(input.url).await {
-            Ok(doc) => doc,
-            Err(err) => {
-                task.state = TaskState::Failed(format!("Page scraping failed: {err}").into());
-                update_task_in_registry(task, app.registry.as_ref(), app.expire.lock().await).await;
-                return;
-            }
-        };
-
-        let title = doc.title.map(|it| it.to_smolstr());
-        task.state = TaskState::Summarizing {
-            title: title.clone(),
-        };
-        update_task_in_registry(task.clone(), app.registry.as_ref(), app.expire.lock().await).await;
-        let summary = app.summarizer.summarize(&doc.content).await;
-        match summary {
-            Ok(summary) => {
-                task.state = TaskState::Done {
-                    title,
-                    summary: summary.into(),
-                };
-                if let Some(client) = app.apn_client.clone()
-                    && let Some(device_token) = input.apn_device_token
-                    && let Some(topic) = input.apn_topic
-                {
-                    tracing::trace!("push APN");
-                    _ = push::apn_state_change(&task, &client, &device_token, Some(&topic))
-                        .await
-                        .inspect_err(|err| {
-                            tracing::error!({ topic = topic, device_token = device_token }, "unable to push APN: {err}")
-                        });
-                } else {
-                    tracing::trace!("no APN configured, skipping");
-                }
-            }
-            Err(err) => {
-                task.state = TaskState::Failed(format!("Summarization failed: {err}").into());
-            }
-        }
-        update_task_in_registry(task, app.registry.as_ref(), app.expire.lock().await).await;
-    });
+    tokio::spawn(run_task(
+        input.clone(),
+        Arc::clone(&foundation),
+        async move |state| {
+            update_task_state(
+                Task {
+                    id: task_id.clone(),
+                    url: input.url.clone().into(),
+                    state,
+                },
+                &input,
+                app.as_ref(),
+                foundation.as_ref(),
+            )
+            .await
+        },
+    ));
     Ok(CreateTaskSuccess {
         task_id: task_id.clone(),
     })
 }
 
-async fn update_task_in_registry<R>(
-    task: Task,
-    registry: &R,
-    mut expire: impl DerefMut<Target = Expire<R>>,
-) where
-    R: TaskRegistry + Sync + 'static,
-    R::Error: Display + Send + 'static,
-{
-    expire.deref_mut().insert(task.id).await;
-    _ = registry
-        .insert(task)
-        .await
-        .inspect_err(|err| tracing::error!("failed to update task state: {err}"));
-}
-
 async fn task_get_handler<R>(
-    State(app): State<Arc<AppState<R>>>,
+    State((app, _)): State<(Arc<AppState<R>>, Arc<AppFoundation>)>,
     Path(id): Path<Uuid>,
 ) -> Result<GetTask, R::Error>
 where
@@ -272,7 +312,7 @@ where
 }
 
 async fn task_delete_handler<R>(
-    State(app): State<Arc<AppState<R>>>,
+    State((app, _)): State<(Arc<AppState<R>>, Arc<AppFoundation>)>,
     Path(id): Path<Uuid>,
 ) -> Result<DeleteTask, R::Error>
 where
@@ -287,7 +327,7 @@ where
 }
 
 async fn task_sse_get_handler<R>(
-    State(app): State<Arc<AppState<R>>>,
+    State((app, _)): State<(Arc<AppState<R>>, Arc<AppFoundation>)>,
     Path(id): Path<Uuid>,
 ) -> Sse<impl Stream<Item = Result<sse::Event, Infallible>>>
 where
@@ -316,7 +356,7 @@ where
     )
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct CreateTask {
     url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -435,5 +475,6 @@ where
                 tracing::warn!("failed to flush registry in time, skipping");
             }
         }
+        self.expire.lock().await.stop().await;
     }
 }
