@@ -161,6 +161,16 @@ impl Scraper {
             }
         }
 
+        // If the page is small enough, just YOLO it
+        let raw_markdown = convert_html_to_md(page.content().await?.as_str())?;
+        if raw_markdown.len() <= self.max_len {
+            return Ok(ScrapeResult {
+                content: raw_markdown,
+                title: page_title,
+            });
+        }
+        drop(raw_markdown);
+
         let font = FontRef::try_from_slice(include_bytes!("MapleMono-Bold.otf")).unwrap();
         for iter_num in 0..self.max_iterations {
             let css = page.layout_metrics().await?;
