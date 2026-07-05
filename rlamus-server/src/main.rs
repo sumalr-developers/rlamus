@@ -9,11 +9,11 @@ use std::{
 
 use anyhow::anyhow;
 use axum::{
-    Form, Json, Router,
-    extract::{Path, State},
-    http::StatusCode,
+    Form, Json, RequestExt, Router,
+    extract::{FromRequest, Path, Request, State},
+    http::{StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response, Sse, sse},
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use clap::{CommandFactory, Parser};
 use futures::{Stream, StreamExt};
@@ -23,22 +23,29 @@ use rlamus_core::{
     scraper::{
         Scraper,
         chromiumoxide::{BrowserConfig, handler::viewport::Viewport},
+        compatiblity::CompatibilityLayer,
+        youtube::YouTubeSiteScraper,
     },
     summarize::Summarize,
 };
 use serde::Deserialize;
-use smol_str::ToSmolStr;
+use smol_str::{SmolStr, ToSmolStr};
 use tokio::sync::Mutex;
+use tokio_util::task::AbortOnDropHandle;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
 use crate::{
     args::Args,
+    shutdown::shutdown_handler,
+    state::{AppFoundation, AppState},
     task::{CachedRegistry, FsRegistry, Task, TaskRegistry, TaskState, expire::Expire},
 };
 
 mod args;
 mod push;
+mod shutdown;
+mod state;
 mod task;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -81,7 +88,8 @@ async fn main() {
             .build()
             .unwrap(),
         OllamaRunner::default(),
-        args.apn
+        args.apn,
+        YouTubeSiteScraper::new(args.data_dir.join("youtube"))
     )
     .await
     .expect("Init app error");
@@ -95,24 +103,12 @@ async fn main() {
         .unwrap();
 }
 
-/// Stateful
-struct AppState<R: TaskRegistry> {
-    registry: Arc<R>,
-    expire: Mutex<Expire<R>>,
-}
-
-/// Stateless
-struct AppFoundation {
-    scraper: Scraper,
-    summarizer: Summarize,
-    apn_client: Option<apns_h2::Client>,
-}
-
 async fn init<R>(
     tasks: R,
     browser: BrowserConfig,
     ollama: OllamaRunner,
     apn: args::Apn,
+    yt_scraper: YouTubeSiteScraper,
 ) -> anyhow::Result<(Router, Arc<AppState<R>>)>
 where
     R: TaskRegistry + Send + Sync + 'static,
@@ -165,11 +161,14 @@ where
 
     let state = Arc::new(AppState {
         registry: Arc::clone(&registry),
+        handles: Default::default(),
         // tasks expire in 4 hours
         expire: Mutex::new(expire),
     });
     let foundation = Arc::new(AppFoundation {
-        scraper: Scraper::launch_browser(browser, ollama.clone()).await?,
+        scraper: Scraper::launch_browser(browser, ollama.clone())
+            .await?
+            .compatibility_layer(CompatibilityLayer::new().with_site_scraper(yt_scraper)),
         summarizer: Summarize::new(ollama),
         apn_client: apn_client,
     });
@@ -179,6 +178,7 @@ where
             .route("/task", post(task_create_handler))
             .route("/task/{id}", get(task_get_handler))
             .route("/task/{id}", delete(task_delete_handler))
+            .route("/task/{id}", patch(task_retry_handler))
             .route("/task/{id}/sse", get(task_sse_get_handler))
             .with_state((Arc::clone(&state), Arc::clone(&foundation))),
         state,
@@ -243,7 +243,7 @@ async fn update_task_state<R>(
         _ = push::apn_state_change(&task, client, device_token, Some(topic))
                         .await
                         .inspect_err(|err| {
-                            tracing::error!({ topic = topic, device_token = device_token }, "unable to push APN: {err}")
+                            tracing::error!({ topic = ?topic, device_token = ?device_token }, "unable to push APN: {err}")
                         });
     } else {
         tracing::trace!("no APN configured, skipping");
@@ -264,7 +264,7 @@ async fn root_handler() -> &'static str {
 
 async fn task_create_handler<R>(
     State((app, foundation)): State<(Arc<AppState<R>>, Arc<AppFoundation>)>,
-    Form(input): Form<CreateTask>,
+    JsonOrForm(input): JsonOrForm<CreateTask>,
 ) -> Result<CreateTaskSuccess, R::Error>
 where
     R: TaskRegistry + Send + Sync + 'static,
@@ -274,28 +274,84 @@ where
     let task_id = task.id.clone();
     app.registry.insert(task).await?;
 
-    tokio::spawn(run_task(
-        input.clone(),
-        Arc::clone(&foundation),
-        async move |state| {
-            update_task_state(
-                Task {
-                    id: task_id.clone(),
-                    url: input.url.clone().into(),
-                    state,
-                },
-                &input,
-                app.as_ref(),
-                foundation.as_ref(),
-            )
-            .await
-        },
-    ));
-    Ok(CreateTaskSuccess {
-        task_id: task_id.clone(),
-    })
+    let handle = {
+        let app = Arc::clone(&app);
+        tokio::spawn(run_task(
+            input.clone(),
+            Arc::clone(&foundation),
+            async move |state| {
+                update_task_state(
+                    Task {
+                        id: task_id.clone(),
+                        url: input.url.clone().into(),
+                        state,
+                    },
+                    &input,
+                    app.as_ref(),
+                    foundation.as_ref(),
+                )
+                .await
+            },
+        ))
+    };
+    app.handles
+        .write()
+        .await
+        .insert(task_id.clone(), AbortOnDropHandle::new(handle));
+
+    Ok(CreateTaskSuccess { task_id })
 }
 
+async fn task_retry_handler<R>(
+    State((app, foundation)): State<(Arc<AppState<R>>, Arc<AppFoundation>)>,
+    Path(id): Path<Uuid>,
+    JsonOrForm(input): JsonOrForm<PatchTask>,
+) -> Result<PatchTaskResponse, R::Error>
+where
+    R: TaskRegistry + Send + Sync + 'static,
+    R::Error: IntoResponse + Display + Send,
+{
+    let mut task = app.registry.get(&id).await?;
+    if let Some(task) = task.as_mut() {
+        if let Some(url) = input.url {
+            task.url = url.clone().into();
+        }
+        task.state = TaskState::Init;
+        app.registry.insert(task.clone()).await?;
+
+        let task_url = task.url.clone();
+        let create_input = CreateTask {
+            url: task_url.clone().into(),
+            apn_device_token: input.apn_device_token,
+            apn_topic: input.apn_topic,
+        };
+        let handle = {
+            let app = Arc::clone(&app);
+            tokio::spawn(run_task(
+                create_input.clone(),
+                Arc::clone(&foundation),
+                async move |state| {
+                    update_task_state(
+                        Task {
+                            id: id.clone(),
+                            url: task_url.clone(),
+                            state,
+                        },
+                        &create_input,
+                        app.as_ref(),
+                        foundation.as_ref(),
+                    )
+                    .await
+                },
+            ))
+        };
+        app.handles
+            .write()
+            .await
+            .insert(task.id, AbortOnDropHandle::new(handle));
+    }
+    Ok(task.into())
+}
 async fn task_get_handler<R>(
     State((app, _)): State<(Arc<AppState<R>>, Arc<AppFoundation>)>,
     Path(id): Path<Uuid>,
@@ -360,9 +416,18 @@ where
 struct CreateTask {
     url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    apn_device_token: Option<String>,
+    apn_device_token: Option<SmolStr>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    apn_topic: Option<String>,
+    apn_topic: Option<SmolStr>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct PatchTask {
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apn_device_token: Option<SmolStr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apn_topic: Option<SmolStr>,
 }
 
 struct CreateTaskSuccess {
@@ -377,6 +442,11 @@ enum GetTask {
 enum DeleteTask {
     NotFound,
     Deleted,
+}
+
+enum PatchTaskResponse {
+    NotFound,
+    Patched,
 }
 
 impl IntoResponse for CreateTaskSuccess {
@@ -415,6 +485,21 @@ impl IntoResponse for DeleteTask {
     }
 }
 
+impl IntoResponse for PatchTaskResponse {
+    fn into_response(self) -> Response {
+        match self {
+            PatchTaskResponse::NotFound => Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body("Task not found".into())
+                .unwrap(),
+            PatchTaskResponse::Patched => Response::builder()
+                .status(StatusCode::OK)
+                .body("Task patched".into())
+                .unwrap(),
+        }
+    }
+}
+
 impl From<Option<Task>> for GetTask {
     fn from(value: Option<Task>) -> Self {
         value.map(Self::Found).unwrap_or(Self::NotFound)
@@ -430,51 +515,42 @@ impl From<Option<Task>> for DeleteTask {
     }
 }
 
-trait Shutdown {
-    async fn shutdown(&self);
-}
-
-async fn shutdown_handler(state: impl Shutdown) {
-    use tokio::signal;
-
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+impl From<Option<Task>> for PatchTaskResponse {
+    fn from(value: Option<Task>) -> Self {
+        match value {
+            Some(_) => Self::Patched,
+            None => Self::NotFound,
+        }
     }
-
-    tracing::info!("shutting down gracefully");
-    state.shutdown().await;
 }
 
-impl<R> Shutdown for Arc<AppState<CachedRegistry<R>>>
+struct JsonOrForm<T>(T);
+
+impl<S, T> FromRequest<S> for JsonOrForm<T>
 where
-    R: TaskRegistry + Send + Sync,
-    R::Error: Display + Debug + Send + Sync,
+    S: Send + Sync,
+    Json<T>: FromRequest<()>,
+    Form<T>: FromRequest<()>,
+    T: 'static,
 {
-    async fn shutdown(&self) {
-        match tokio::time::timeout(Duration::from_secs(5), self.registry.flush()).await {
-            Ok(_) => {}
-            Err(_) => {
-                tracing::warn!("failed to flush registry in time, skipping");
+    type Rejection = Response;
+
+    async fn from_request(req: Request, _state: &S) -> Result<Self, Self::Rejection> {
+        let content_type_header = req.headers().get(CONTENT_TYPE);
+        let content_type = content_type_header.and_then(|value| value.to_str().ok());
+
+        if let Some(content_type) = content_type {
+            if content_type.starts_with("application/json") {
+                let Json(payload) = req.extract().await.map_err(IntoResponse::into_response)?;
+                return Ok(Self(payload));
+            }
+
+            if content_type.starts_with("application/x-www-form-urlencoded") {
+                let Form(payload) = req.extract().await.map_err(IntoResponse::into_response)?;
+                return Ok(Self(payload));
             }
         }
-        self.expire.lock().await.stop().await;
+
+        Err(StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response())
     }
 }

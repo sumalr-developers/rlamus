@@ -32,11 +32,10 @@ impl TaskRegistry for FsRegistry {
     type Error = Error;
 
     async fn insert(&self, task: Task) -> Result<(), Self::Error> {
-        tokio::fs::write(
-            self.path_by_id(&task.id),
-            serde_json::to_vec(&task).unwrap(),
-        )
-        .await?;
+        let path = self.path_by_id(&task.id);
+        tokio::fs::write(&path, serde_json::to_vec(&task).unwrap())
+            .await
+            .map_err(|err| Error(err.into(), path))?;
         _ = self.tx.send(task);
         Ok(())
     }
@@ -45,28 +44,43 @@ impl TaskRegistry for FsRegistry {
         let Some(task) = self.get(id).await? else {
             return Ok(None);
         };
-        tokio::fs::remove_file(self.path_by_id(id)).await?;
+        let path = self.path_by_id(id);
+        tokio::fs::remove_file(&path)
+            .await
+            .map_err(|err| Error(err.into(), path))?;
         Ok(Some(task))
     }
 
     async fn get(&self, id: &Uuid) -> Result<Option<Task>, Self::Error> {
-        let path = self.path_by_id(&id);
-        if !tokio::fs::try_exists(&path).await? {
+        let mut path = Some(self.path_by_id(&id));
+        if !tokio::fs::try_exists(path.as_ref().unwrap())
+            .await
+            .map_err(|err| Error(err.into(), path.take().unwrap()))?
+        {
             return Ok(None);
         }
-        let buf = tokio::fs::read(&path).await?;
-        Ok(Some(serde_json::from_slice(&buf)?))
+        let buf = tokio::fs::read(path.as_ref().unwrap())
+            .await
+            .map_err(|err| Error(err.into(), path.clone().take().unwrap()))?;
+        Ok(Some(
+            serde_json::from_slice(&buf).map_err(|err| Error(err.into(), path.take().unwrap()))?,
+        ))
     }
 
     fn iter(&self) -> impl Stream<Item = Result<Task, Self::Error>> {
         try_stream! {
-            let mut entries = tokio::fs::read_dir(&self.base_dir).await?;
-            while let Some(entry) = entries.next_entry().await? {
+            let mut entries = tokio::fs::read_dir(&self.base_dir).await.map_err(|err| Error(err.into(), self.base_dir.clone()))?;
+            while let Some(entry) = entries.next_entry().await.map_err(|err| Error(err.into(), self.base_dir.clone()))? {
                 let path = entry.path();
                 if !path.is_file() || !path.extension().is_some_and(|ext| ext == "json") {
                     continue;
                 }
-                let task = serde_json::from_slice(tokio::fs::read(path).await?.as_slice())?;
+                let task = serde_json::from_slice(
+                    tokio::fs::read(&path)
+                        .await
+                        .map_err(|err| Error(err.into(), path.clone()))?
+                        .as_slice()
+                ).map_err(|err| Error(err.into(), path))?;
                 yield task;
             }
         }
@@ -92,7 +106,11 @@ impl TaskRegistry for FsRegistry {
 }
 
 #[derive(Debug, Error)]
-pub enum Error {
+#[error("{0} (file: {1})")]
+pub struct Error(ErrorKind, PathBuf);
+
+#[derive(Debug, Error)]
+pub enum ErrorKind {
     #[error("IO: {0}")]
     IO(#[from] std::io::Error),
     #[error("decode: {0}")]

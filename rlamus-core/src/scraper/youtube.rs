@@ -1,18 +1,24 @@
+use std::path::PathBuf;
+
 use rustypipe::{client::RustyPipe, model::richtext::ToMarkdown};
 use thiserror::Error;
 use url::Url;
 
 use crate::scraper::{ScrapeResult, compatiblity::SiteScraper};
 
+#[derive(Default)]
 pub struct YouTubeSiteScraper {
     rp: RustyPipe,
     http: reqwest::Client,
 }
 
 impl YouTubeSiteScraper {
-    pub fn new() -> Self {
+    pub fn new(storage_dir: impl Into<PathBuf>) -> Self {
         Self {
-            rp: RustyPipe::new(),
+            rp: RustyPipe::builder()
+                .storage_dir(storage_dir)
+                .build()
+                .unwrap(),
             http: reqwest::Client::new(),
         }
     }

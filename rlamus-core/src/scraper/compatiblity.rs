@@ -1,4 +1,4 @@
-use std::error::Error as StdError;
+use std::{collections::BTreeMap, error::Error as StdError};
 
 use futures::{TryFutureExt, future::BoxFuture};
 use thiserror::Error;
@@ -15,6 +15,7 @@ trait SiteScraperHolder: Send + Sync {
     ) -> BoxFuture<'a, Result<ScrapeResult, Box<dyn StdError>>>;
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ScraperInfo {
     name: &'static str,
 }
@@ -32,7 +33,7 @@ pub trait SiteScraper {
 }
 
 pub struct CompatibilityLayer {
-    scrapers: Vec<(ScraperInfo, Box<dyn SiteScraperHolder>)>,
+    scrapers: BTreeMap<ScraperInfo, Box<dyn SiteScraperHolder>>,
 }
 
 impl CompatibilityLayer {
@@ -47,7 +48,7 @@ impl CompatibilityLayer {
         S: SiteScraper + Send + Sync + 'static,
     {
         self.scrapers
-            .push((ScraperInfo::new::<S>(), Box::new(scraper)));
+            .insert(ScraperInfo::new::<S>(), Box::new(scraper));
         self
     }
 
@@ -69,17 +70,18 @@ impl CompatibilityLayer {
 
 impl Default for CompatibilityLayer {
     fn default() -> Self {
+        let scrapers: [(ScraperInfo, Box<dyn SiteScraperHolder>); _] = [
+            (
+                ScraperInfo::new::<RedditSiteScraper>(),
+                Box::new(RedditSiteScraper::default()),
+            ),
+            (
+                ScraperInfo::new::<YouTubeSiteScraper>(),
+                Box::new(YouTubeSiteScraper::default()),
+            ),
+        ];
         Self {
-            scrapers: vec![
-                (
-                    ScraperInfo::new::<RedditSiteScraper>(),
-                    Box::new(RedditSiteScraper::default()),
-                ),
-                (
-                    ScraperInfo::new::<YouTubeSiteScraper>(),
-                    Box::new(YouTubeSiteScraper::new()),
-                ),
-            ],
+            scrapers: scrapers.into_iter().collect(),
         }
     }
 }
