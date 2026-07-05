@@ -168,7 +168,7 @@ where
     let foundation = Arc::new(AppFoundation {
         scraper: Scraper::launch_browser(browser, ollama.clone())
             .await?
-            .compatibility_layer(CompatibilityLayer::new().with_site_scraper(yt_scraper)),
+            .compatibility_layer(CompatibilityLayer::default().with_site_scraper(yt_scraper)),
         summarizer: Summarize::new(ollama),
         apn_client: apn_client,
     });
