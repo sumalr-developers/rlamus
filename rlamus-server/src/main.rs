@@ -395,13 +395,17 @@ where
         app.expire.lock().await.insert(task.id).await;
     }
     let stream = futures::stream::once(future::ready(current))
-        .filter_map(async |it| it.ok().flatten())
+        .filter_map(async |it| it.ok())
         .chain(app.registry.changes_on(id))
-        .then(async |task| {
-            sse::Event::default()
-                .event("update")
-                .json_data(task)
-                .unwrap()
+        .then(async |change| {
+            if let Some(task) = change {
+                sse::Event::default()
+                    .event("update")
+                    .json_data(task)
+                    .unwrap()
+            } else {
+                sse::Event::default().event("update").data("null")
+            }
         })
         .map(Ok);
 

@@ -9,8 +9,8 @@ use crate::task::{Task, TaskRegistry};
 
 pub struct FsRegistry {
     base_dir: PathBuf,
-    tx: broadcast::Sender<Task>,
-    rx: broadcast::Receiver<Task>,
+    tx: broadcast::Sender<(Uuid, Option<Task>)>,
+    rx: broadcast::Receiver<(Uuid, Option<Task>)>,
 }
 
 impl FsRegistry {
@@ -36,7 +36,7 @@ impl TaskRegistry for FsRegistry {
         tokio::fs::write(&path, serde_json::to_vec(&task).unwrap())
             .await
             .map_err(|err| Error(err.into(), path))?;
-        _ = self.tx.send(task);
+        _ = self.tx.send((task.id, Some(task)));
         Ok(())
     }
 
@@ -48,6 +48,8 @@ impl TaskRegistry for FsRegistry {
         tokio::fs::remove_file(&path)
             .await
             .map_err(|err| Error(err.into(), path))?;
+
+        _ = self.tx.send((id.clone(), None));
         Ok(Some(task))
     }
 
@@ -86,15 +88,15 @@ impl TaskRegistry for FsRegistry {
         }
     }
 
-    fn changes_on(&self, id: Uuid) -> impl Stream<Item = Task> + use<> {
+    fn changes_on(&self, id: Uuid) -> impl Stream<Item = Option<Task>> + use<> {
         let mut rx = self.rx.resubscribe();
 
         stream! {
             loop {
                 match rx.recv().await {
-                    Ok(task) => {
-                        if task.id == id {
-                            yield task;
+                    Ok((task_id, change)) => {
+                        if task_id == id {
+                            yield change;
                         }
                     },
                     Err(RecvError::Lagged(_)) => {}

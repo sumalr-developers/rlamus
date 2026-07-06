@@ -27,8 +27,8 @@ where
     op_queue: Arc<RwLock<HashMap<Uuid, Op>>>,
     auto_flush: usize,
     lru: RwLock<LinkedList<Uuid>>,
-    tx: broadcast::Sender<Task>,
-    rx: broadcast::Receiver<Task>,
+    tx: broadcast::Sender<(Uuid, Option<Task>)>,
+    rx: broadcast::Receiver<(Uuid, Option<Task>)>,
 }
 
 #[derive(Clone, Copy)]
@@ -152,7 +152,7 @@ where
                 cache.remove(&id);
             }
         }
-        _ = self.tx.send(task);
+        _ = self.tx.send((task.id, Some(task)));
         Ok(())
     }
 
@@ -163,7 +163,9 @@ where
             self.flush().await?;
         }
 
-        Ok(self.cache.write().await.remove(id))
+        let removed = self.cache.write().await.remove(id);
+        _ = self.tx.send((id.clone(), None));
+        Ok(removed)
     }
 
     async fn get(&self, id: &Uuid) -> Result<Option<Task>, Self::Error> {
@@ -202,15 +204,15 @@ where
         }
     }
 
-    fn changes_on(&self, id: Uuid) -> impl Stream<Item = Task> + use<Inner> {
+    fn changes_on(&self, id: Uuid) -> impl Stream<Item = Option<Task>> + use<Inner> {
         let mut rx = self.rx.resubscribe();
 
         stream! {
             loop {
                 match rx.recv().await {
-                    Ok(task) => {
-                        if task.id == id {
-                            yield task;
+                    Ok((task_id, change)) => {
+                        if task_id == id {
+                            yield change;
                         }
                     },
                     Err(RecvError::Lagged(_)) => {}

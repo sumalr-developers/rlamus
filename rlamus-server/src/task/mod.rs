@@ -42,7 +42,7 @@ pub trait TaskRegistry {
     async fn get(&self, id: &Uuid) -> Result<Option<Task>, Self::Error>;
     fn iter(&self) -> impl Stream<Item = Result<Task, Self::Error>>;
 
-    fn changes_on(&self, id: Uuid) -> impl Stream<Item = Task> + use<Self>;
+    fn changes_on(&self, id: Uuid) -> impl Stream<Item = Option<Task>> + use<Self>;
 }
 
 impl Task {
