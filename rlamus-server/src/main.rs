@@ -153,7 +153,7 @@ where
         }
     };
     let registry = Arc::new(tasks);
-    let mut expire = Expire::new(registry.clone(), Duration::from_secs(60 * 60 * 4));
+    let mut expire = Expire::new(registry.clone(), Duration::from_secs(60 * 60 * 24));
 
     if let Err(err) = expire.start().await {
         tracing::error!("failed to start expirer: {err}");
@@ -162,7 +162,7 @@ where
     let state = Arc::new(AppState {
         registry: Arc::clone(&registry),
         handles: Default::default(),
-        // tasks expire in 4 hours
+        // tasks expire in 1 day
         expire: Mutex::new(expire),
     });
     let foundation = Arc::new(AppFoundation {
