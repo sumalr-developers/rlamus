@@ -2,6 +2,7 @@ use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashSet},
     hash::Hash,
+    time::Duration,
 };
 
 use ab_glyph::FontRef;
@@ -49,6 +50,7 @@ pub struct Scraper {
     handle: tokio::task::JoinHandle<()>,
     runner: OllamaRunner,
     compatibiltiy_layer: CompatibilityLayer,
+    min_len: usize,
     max_len: usize,
     max_iterations: usize,
 }
@@ -64,6 +66,7 @@ impl Scraper {
             handle: tokio::spawn(async move { while handler.next().await.is_some() {} }),
             runner: runner.into(),
             compatibiltiy_layer: CompatibilityLayer::default(),
+            min_len: 50,
             max_len: 5_000,
             max_iterations: 5,
         })
@@ -71,6 +74,11 @@ impl Scraper {
 
     pub fn max_len(mut self, limit: usize) -> Self {
         self.max_len = limit;
+        self
+    }
+
+    pub fn min_len(mut self, limit: usize) -> Self {
+        self.min_len = limit;
         self
     }
 
@@ -82,6 +90,25 @@ impl Scraper {
     pub fn compatibility_layer(mut self, value: CompatibilityLayer) -> Self {
         self.compatibiltiy_layer = value;
         self
+    }
+
+    async fn get_markdown_maybe_imcomplete(&self, page: &Page) -> Result<String, Error> {
+        // Prioritize *the* main tag
+        if let Ok(main_tags) = page.find_elements("main").await
+            && main_tags.len() == 1
+        {
+            let tag = main_tags.first().unwrap();
+            let content = tag.inner_html().await?;
+            if let Some(content) = content {
+                tracing::trace!("using <main> tag");
+                let markdown = convert_html_to_md(&content)?;
+                return Ok(markdown);
+            }
+        }
+
+        // If the page is small enough, just YOLO it
+        let raw_markdown = convert_html_to_md(page.content().await?.as_str())?;
+        return Ok(raw_markdown);
     }
 
     pub async fn get_markdown_uncropped(
@@ -123,7 +150,7 @@ impl Scraper {
             .await?
             .wait_for_navigation()
             .await?;
-        let page_title = page.get_title().await.ok().flatten();
+        let page_title = async || page.get_title().await.ok().flatten();
 
         if let Ok(Some(url)) = page.url().await
             && url != original_url
@@ -145,31 +172,25 @@ impl Scraper {
                 }
             }
         }
-        // Prioritize *the* main tag
-        if let Ok(main_tags) = page.find_elements("main").await
-            && main_tags.len() == 1
-        {
-            let tag = main_tags.first().unwrap();
-            let content = tag.inner_html().await?;
-            if let Some(content) = content {
-                tracing::trace!("using <main> tag");
-                let markdown = convert_html_to_md(&content)?;
-                return Ok(ScrapeResult {
-                    content: markdown,
-                    title: page_title,
-                });
+
+        // wait for at most 10 seconds for the page to load (javascript)
+        for _ in 0..5 {
+            match self.get_markdown_maybe_imcomplete(&page).await {
+                Ok(markdown) => {
+                    if (self.min_len..=self.max_len).contains(&markdown.len()) {
+                        return Ok(ScrapeResult {
+                            content: markdown,
+                            title: page_title().await,
+                        });
+                    }
+                    tracing::trace!("wait 2 seconds for page to load");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                Err(err) => {
+                    tracing::warn!("premature optimization failed: {err}")
+                }
             }
         }
-
-        // If the page is small enough, just YOLO it
-        let raw_markdown = convert_html_to_md(page.content().await?.as_str())?;
-        if raw_markdown.len() <= self.max_len {
-            return Ok(ScrapeResult {
-                content: raw_markdown,
-                title: page_title,
-            });
-        }
-        drop(raw_markdown);
 
         let font = FontRef::try_from_slice(include_bytes!("MapleMono-Bold.otf")).unwrap();
         for iter_num in 0..self.max_iterations {
@@ -211,7 +232,7 @@ impl Scraper {
                 event!(Level::INFO, "iterations ended with no sections");
                 return Ok(ScrapeResult {
                     content: convert_html_to_md(page.content().await?.as_str())?,
-                    title: page_title,
+                    title: page_title().await,
                 });
             }
             let mut unannotated: BinaryHeap<Reverse<&Section>> =
@@ -259,7 +280,7 @@ impl Scraper {
             .send_chat_messages_with_history(&mut history, {
                 let msg = ChatMessage::user(format!(
                         "{}You're tasked with identifying the main section where key info lives, usually richest in content. There are {} sections, each marked by a red rectangle and a center aligned label. Respond with a number. No explanations.", 
-                        page_title.as_ref().map(|title| format!("Page's titled {title:?}. ")).unwrap_or("".into()),
+                        page_title().await.as_ref().map(|title| format!("Page's titled {title:?}. ")).unwrap_or("".into()),
                         sections.len())
                     ).with_images(screenshots.into_iter().map(|it| {
                     let mut buf = vec![];
@@ -305,7 +326,7 @@ impl Scraper {
                 event!(Level::TRACE, "final iteration is {iter_num}");
                 return Ok(ScrapeResult {
                     content: markdown,
-                    title: page_title,
+                    title: page_title().await,
                 });
             }
 
@@ -327,7 +348,7 @@ impl Scraper {
                 event!(Level::TRACE, "final iteration is {iter_num}");
                 return Ok(ScrapeResult {
                     content: markdown,
-                    title: page_title,
+                    title: page_title().await,
                 });
             }
         }

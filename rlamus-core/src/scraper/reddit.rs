@@ -84,7 +84,6 @@ impl SiteScraper for RedditSiteScraper {
     }
 
     fn can_handle(&self, url: &Url) -> bool {
-        tracing::trace!("can handle \"{url}\"?");
         match RedditUrl::try_from(url) {
             Ok(_) => true,
             Err(err) => {

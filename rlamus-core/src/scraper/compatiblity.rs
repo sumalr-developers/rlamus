@@ -58,7 +58,12 @@ impl CompatibilityLayer {
             .scrapers
             .iter()
             .find(|(info, it)| {
-                debug_span!("can_handle", scraper = info.name).in_scope(|| it.can_handle(&url))
+                debug_span!("can_handle", scraper = info.name).in_scope(|| {
+                    tracing::trace!("\"{url}\"?");
+                    let capable = it.can_handle(&url);
+                    tracing::debug!("capable = {capable}");
+                    capable
+                })
             })
             .ok_or(Error::CannotHandle)?;
         Ok(scraper
