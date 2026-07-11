@@ -4,8 +4,8 @@ use smol_str::{SmolStr, ToSmolStr};
 use uuid::Uuid;
 
 mod cached_registry;
-mod fs_registry;
 pub mod expire;
+mod fs_registry;
 
 pub use cached_registry::CachedRegistry;
 pub use fs_registry::FsRegistry;
@@ -26,9 +26,16 @@ pub enum TaskState {
     Summarizing {
         title: Option<SmolStr>,
     },
+    Embedding {
+        title: Option<SmolStr>,
+        summary: SmolStr,
+    },
     Done {
         title: Option<SmolStr>,
         summary: SmolStr,
+        #[serde(default)]
+        embedding: Vec<f32>,
+        embedding_model: String,
     },
     Failed(SmolStr),
 }

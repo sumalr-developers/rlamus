@@ -18,6 +18,7 @@ use axum::{
 use clap::{CommandFactory, Parser};
 use futures::{Stream, StreamExt};
 use rlamus_core::{
+    embeddings::Embeddings,
     environ,
     ollama::OllamaRunner,
     scraper::{
@@ -61,6 +62,7 @@ async fn main() {
         )
         .init();
 
+    let llm_ollama = OllamaRunner::default();
     let (app, state) = init(
         CachedRegistry::new(FsRegistry::new(&args.data_dir)),
         BrowserConfig::builder()
@@ -87,7 +89,8 @@ async fn main() {
             }))
             .build()
             .unwrap(),
-        OllamaRunner::default(),
+        llm_ollama.clone(),
+        llm_ollama.with_model_from_env_or("EMBEDDING_MODEL", "hf.co/jinaai/jina-embeddings-v5-text-small-clustering:Q4_K_M"),
         args.apn,
         YouTubeSiteScraper::new(args.data_dir.join("youtube"))
     )
@@ -106,7 +109,8 @@ async fn main() {
 async fn init<R>(
     tasks: R,
     browser: BrowserConfig,
-    ollama: OllamaRunner,
+    llm: OllamaRunner,
+    embedding: OllamaRunner,
     apn: args::Apn,
     yt_scraper: YouTubeSiteScraper,
 ) -> anyhow::Result<(Router, Arc<AppState<R>>)>
@@ -166,10 +170,11 @@ where
         expire: Mutex::new(expire),
     });
     let foundation = Arc::new(AppFoundation {
-        scraper: Scraper::launch_browser(browser, ollama.clone())
+        scraper: Scraper::launch_browser(browser, llm.clone())
             .await?
             .compatibility_layer(CompatibilityLayer::default().with_site_scraper(yt_scraper)),
-        summarizer: Summarize::new(ollama),
+        summarizer: Summarize::new(llm),
+        embedder: Embeddings::new(embedding),
         apn_client: apn_client,
     });
     Ok((
@@ -207,20 +212,38 @@ where
         title: title.clone(),
     })
     .await;
-    let summary = app.summarizer.summarize(&doc.content).await;
-    match summary {
+    let summary = match app.summarizer.summarize(&doc.content).await {
         Ok(summary) => {
-            set_state(TaskState::Done {
-                title,
-                summary: summary.into(),
+            let ss = summary.to_smolstr();
+            set_state(TaskState::Embedding {
+                title: title.clone(),
+                summary: ss.clone(),
             })
             .await;
+            ss
         }
         Err(err) => {
             set_state(TaskState::Failed(
                 format!("Summarization failed: {err}").into(),
             ))
             .await;
+            return;
+        }
+    };
+
+    match app.embedder.get_embeddings([summary.clone()]).await {
+        Ok(response) => {
+            set_state(TaskState::Done {
+                title: title.clone(),
+                summary: summary.clone(),
+                embedding: response.embeddings.into_iter().next().unwrap(),
+                embedding_model: response.model_name,
+            })
+            .await;
+        }
+        Err(err) => {
+            set_state(TaskState::Failed(format!("Embedding failed: {err}").into())).await;
+            return;
         }
     }
 }

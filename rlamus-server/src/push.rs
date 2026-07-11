@@ -13,8 +13,8 @@ pub async fn apn_state_change(
     match task.state.clone() {
         crate::task::TaskState::Init => {}
         crate::task::TaskState::Scraping => {}
-        crate::task::TaskState::Summarizing { title } => {}
-        crate::task::TaskState::Done { title, summary: _ } => {
+        crate::task::TaskState::Summarizing { title: _ } => {}
+        crate::task::TaskState::Embedding { title, summary: _ } => {
             let mut builder = DefaultNotificationBuilder::new()
                 .title_loc_key("TASK_DONE")
                 .sound("default")
@@ -42,7 +42,13 @@ pub async fn apn_state_change(
 
             client.send(payload).await?;
         }
-        crate::task::TaskState::Failed(smol_str) => {}
+        crate::task::TaskState::Done {
+            title: _,
+            summary: _,
+            embedding: _,
+            embedding_model: _,
+        } => {}
+        crate::task::TaskState::Failed(_) => {}
     }
     Ok(())
 }

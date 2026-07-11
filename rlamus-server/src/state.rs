@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use rlamus_core::{scraper::Scraper, summarize::Summarize};
+use rlamus_core::{embeddings::Embeddings, scraper::Scraper, summarize::Summarize};
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
@@ -18,5 +18,6 @@ pub struct AppState<R: TaskRegistry> {
 pub struct AppFoundation {
     pub scraper: Scraper,
     pub summarizer: Summarize,
+    pub embedder: Embeddings,
     pub apn_client: Option<apns_h2::Client>,
 }
