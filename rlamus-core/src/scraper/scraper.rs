@@ -405,9 +405,15 @@ fn annotate_screenshot<'a>(
     font: FontRef,
 ) -> HashSet<u32> {
     const RED: image::Rgb<u8> = image::Rgb([255, 0, 0]);
+    const GREEN: image::Rgb<u8> = image::Rgb([0, 255, 0]);
+    const BLUE: image::Rgb<u8> = image::Rgb([0, 0, 255]);
+    const PURPLE: image::Rgb<u8> = image::Rgb([255, 0, 255]);
+    const YELLOW: image::Rgb<u8> = image::Rgb([255, 255, 0]);
+    const CYAN: image::Rgb<u8> = image::Rgb([0, 255, 255]);
+    const FRAME_COLORS: [image::Rgb<u8>; 6] = [RED, GREEN, BLUE, PURPLE, YELLOW, CYAN];
     const WHITE: image::Rgb<u8> = image::Rgb([255, 255, 255]);
     let mut annotated = HashSet::new();
-    for section in sections {
+    for (section_id, section) in sections.into_iter().enumerate() {
         let direct: Rect = section.bounds.clone();
         let bounds: Rect = {
             let Some(result) = viewport.intersect(direct) else {
@@ -428,7 +434,7 @@ fn annotate_screenshot<'a>(
             annotated.insert(section.id);
         }
 
-        drawing::draw_hollow_rect_mut(screenshot, bounds, RED);
+        drawing::draw_hollow_rect_mut(screenshot, bounds, FRAME_COLORS[section_id % FRAME_COLORS.len()]);
         let section_text = format!("Section {}", section.id);
         let mut scale = 24f32;
         let (mut width, mut height) = drawing::text_size(scale, &font, &section_text);
@@ -450,7 +456,7 @@ fn annotate_screenshot<'a>(
                 .min(viewport.height() as i32 - padding as i32 * 3 - height as i32),
         )
         .of_size(width + padding * 2, height + padding * 2);
-        drawing::draw_filled_rect_mut(screenshot, draw_area, RED);
+        drawing::draw_filled_rect_mut(screenshot, draw_area, FRAME_COLORS[section_id % FRAME_COLORS.len()]);
         drawing::draw_text_mut(
             screenshot,
             WHITE,
