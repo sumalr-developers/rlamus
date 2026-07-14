@@ -67,7 +67,7 @@ impl Scraper {
             runner: runner.into(),
             compatibiltiy_layer: CompatibilityLayer::default(),
             min_len: 50,
-            max_len: 5_000,
+            max_len: 32_000,
             max_iterations: 5,
         })
     }
@@ -101,6 +101,19 @@ impl Scraper {
             let content = tag.inner_html().await?;
             if let Some(content) = content {
                 tracing::trace!("using <main> tag");
+                let markdown = convert_html_to_md(&content)?;
+                return Ok(markdown);
+            }
+        }
+
+        // Article is also viable
+        if let Ok(article_tags) = page.find_elements("article").await
+            && article_tags.len() == 1
+        {
+            let tag = article_tags.first().unwrap();
+            let content = tag.inner_html().await?;
+            if let Some(content) = content {
+                tracing::trace!("using <article> tag");
                 let markdown = convert_html_to_md(&content)?;
                 return Ok(markdown);
             }
