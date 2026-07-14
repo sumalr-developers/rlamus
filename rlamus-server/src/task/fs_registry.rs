@@ -1,11 +1,14 @@
 use async_stream::{stream, try_stream};
 use futures::Stream;
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 use thiserror::Error;
 use tokio::sync::broadcast::{self, error::RecvError};
 use uuid::Uuid;
 
-use crate::task::{Task, TaskRegistry};
+use crate::task::{Task, TaskRegistry, expire::WithTaskId};
 
 pub struct FsRegistry {
     base_dir: PathBuf,
@@ -35,44 +38,52 @@ impl TaskRegistry for FsRegistry {
         let path = self.path_by_id(&task.id);
         tokio::fs::write(&path, serde_json::to_vec(&task).unwrap())
             .await
-            .map_err(|err| Error(err.into(), path))?;
+            .map_err(|err| Error(err.into(), entry_id(&path), path))?;
         _ = self.tx.send((task.id, Some(task)));
         Ok(())
     }
 
     async fn remove(&self, id: &Uuid) -> Result<Option<Task>, Self::Error> {
-        let Some(task) = self.get(id).await? else {
-            return Ok(None);
-        };
         let path = self.path_by_id(id);
-        tokio::fs::remove_file(&path)
-            .await
-            .map_err(|err| Error(err.into(), path))?;
+        let removed = self.get(id).await;
+        if let Err(err) = tokio::fs::remove_file(&path).await
+            && err.kind() == std::io::ErrorKind::NotFound
+            && removed.as_ref().is_ok_and(|it| it.is_some())
+        {
+            return Err(Error(err.into(), entry_id(&path), path));
+        }
 
         _ = self.tx.send((id.clone(), None));
-        Ok(Some(task))
+        Ok(removed?)
     }
 
     async fn get(&self, id: &Uuid) -> Result<Option<Task>, Self::Error> {
         let mut path = Some(self.path_by_id(&id));
         if !tokio::fs::try_exists(path.as_ref().unwrap())
             .await
-            .map_err(|err| Error(err.into(), path.take().unwrap()))?
+            .map_err(|err| {
+                let path = path.take().unwrap();
+                Error(err.into(), entry_id(&path), path)
+            })?
         {
             return Ok(None);
         }
         let buf = tokio::fs::read(path.as_ref().unwrap())
             .await
-            .map_err(|err| Error(err.into(), path.clone().take().unwrap()))?;
-        Ok(Some(
-            serde_json::from_slice(&buf).map_err(|err| Error(err.into(), path.take().unwrap()))?,
-        ))
+            .map_err(|err| {
+                let path = path.clone().take().unwrap();
+                Error(err.into(), entry_id(&path), path.clone())
+            })?;
+        Ok(Some(serde_json::from_slice(&buf).map_err(|err| {
+            let path = path.take().unwrap();
+            Error(err.into(), entry_id(&path), path)
+        })?))
     }
 
     fn iter(&self) -> impl Stream<Item = Result<Task, Self::Error>> {
         try_stream! {
-            let mut entries = tokio::fs::read_dir(&self.base_dir).await.map_err(|err| Error(err.into(), self.base_dir.clone()))?;
-            while let Some(entry) = entries.next_entry().await.map_err(|err| Error(err.into(), self.base_dir.clone()))? {
+            let mut entries = tokio::fs::read_dir(&self.base_dir).await.map_err(|err| Error(err.into(), None, self.base_dir.clone()))?;
+            while let Some(entry) = entries.next_entry().await.map_err(|err| Error(err.into(), None, self.base_dir.clone()))? {
                 let path = entry.path();
                 if !path.is_file() || !path.extension().is_some_and(|ext| ext == "json") {
                     continue;
@@ -80,9 +91,9 @@ impl TaskRegistry for FsRegistry {
                 let task = serde_json::from_slice(
                     tokio::fs::read(&path)
                         .await
-                        .map_err(|err| Error(err.into(), path.clone()))?
+                        .map_err(|err| Error(err.into(), entry_id(&path), path.clone()))?
                         .as_slice()
-                ).map_err(|err| Error(err.into(), path))?;
+                ).map_err(|err| Error(err.into(), entry_id(&path), path))?;
                 yield task;
             }
         }
@@ -107,9 +118,15 @@ impl TaskRegistry for FsRegistry {
     }
 }
 
+fn entry_id(path: &Path) -> Option<Uuid> {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .and_then(|name| Uuid::from_str(name).ok())
+}
+
 #[derive(Debug, Error)]
-#[error("{0} (file: {1})")]
-pub struct Error(ErrorKind, PathBuf);
+#[error("{0} (id: {1:?}, file: {2})")]
+pub struct Error(ErrorKind, Option<Uuid>, PathBuf);
 
 #[derive(Debug, Error)]
 pub enum ErrorKind {
@@ -117,4 +134,10 @@ pub enum ErrorKind {
     IO(#[from] std::io::Error),
     #[error("decode: {0}")]
     Decode(#[from] serde_json::Error),
+}
+
+impl WithTaskId for Error {
+    fn task_id(&self) -> Option<&Uuid> {
+        self.1.as_ref()
+    }
 }

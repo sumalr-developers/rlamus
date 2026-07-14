@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     borrow::Cow,
     convert::Infallible,
     fmt::{Debug, Display},
@@ -18,7 +19,7 @@ use axum::{
 use clap::{CommandFactory, Parser};
 use futures::{Stream, StreamExt};
 use rlamus_core::{
-    embeddings::Embeddings,
+    embeddings::{self, Embeddings},
     environ,
     ollama::OllamaRunner,
     scraper::{
@@ -29,7 +30,7 @@ use rlamus_core::{
     },
     summarize::Summarize,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use smol_str::{SmolStr, ToSmolStr};
 use tokio::sync::Mutex;
 use tokio_util::task::AbortOnDropHandle;
@@ -40,7 +41,10 @@ use crate::{
     args::Args,
     shutdown::shutdown_handler,
     state::{AppFoundation, AppState},
-    task::{CachedRegistry, FsRegistry, Task, TaskRegistry, TaskState, expire::Expire},
+    task::{
+        CachedRegistry, FsRegistry, Task, TaskRegistry, TaskState,
+        expire::{Expire, WithTaskId},
+    },
 };
 
 mod args;
@@ -116,7 +120,7 @@ async fn init<R>(
 ) -> anyhow::Result<(Router, Arc<AppState<R>>)>
 where
     R: TaskRegistry + Send + Sync + 'static,
-    R::Error: IntoResponse + Send + Sync + std::error::Error,
+    R::Error: IntoResponse + Send + Sync + std::error::Error + WithTaskId,
 {
     use apns_h2::ClientConfig;
     let apn_config = ClientConfig::new(if apn.apn_sandbox {
@@ -185,6 +189,7 @@ where
             .route("/task/{id}", delete(task_delete_handler))
             .route("/task/{id}", patch(task_retry_handler))
             .route("/task/{id}/sse", get(task_sse_get_handler))
+            .route("/embeddings", post(get_embeddings_handler))
             .with_state((Arc::clone(&state), Arc::clone(&foundation))),
         state,
     ))
@@ -439,6 +444,14 @@ where
     )
 }
 
+async fn get_embeddings_handler<S>(
+    State((_, foundation)): State<(S, Arc<AppFoundation>)>,
+    JsonOrForm(input): JsonOrForm<GetEmbeddings>,
+) -> Result<Json<GetEmbeddingsSuccess>, InternalServerError> {
+    let response = foundation.embedder.get_embeddings(input.queries).await?;
+    Ok(Json(response.into()))
+}
+
 #[derive(Debug, Deserialize, Clone)]
 struct CreateTask {
     url: String,
@@ -455,6 +468,11 @@ struct PatchTask {
     apn_device_token: Option<SmolStr>,
     #[serde(skip_serializing_if = "Option::is_none")]
     apn_topic: Option<SmolStr>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct GetEmbeddings {
+    queries: Vec<String>,
 }
 
 struct CreateTaskSuccess {
@@ -475,6 +493,16 @@ enum PatchTaskResponse {
     NotFound,
     Patched,
 }
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GetEmbeddingsSuccess {
+    embeddings: Vec<Vec<f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_name: Option<String>,
+}
+
+struct InternalServerError(anyhow::Error);
 
 impl IntoResponse for CreateTaskSuccess {
     fn into_response(self) -> Response {
@@ -527,6 +555,12 @@ impl IntoResponse for PatchTaskResponse {
     }
 }
 
+impl IntoResponse for InternalServerError {
+    fn into_response(self) -> Response {
+        (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
+    }
+}
+
 impl From<Option<Task>> for GetTask {
     fn from(value: Option<Task>) -> Self {
         value.map(Self::Found).unwrap_or(Self::NotFound)
@@ -547,6 +581,24 @@ impl From<Option<Task>> for PatchTaskResponse {
         match value {
             Some(_) => Self::Patched,
             None => Self::NotFound,
+        }
+    }
+}
+
+impl<E> From<E> for InternalServerError
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn from(value: E) -> Self {
+        Self(anyhow::Error::new(value))
+    }
+}
+
+impl From<embeddings::Response> for GetEmbeddingsSuccess {
+    fn from(value: embeddings::Response) -> Self {
+        Self {
+            embeddings: value.embeddings,
+            model_name: Some(value.model_name),
         }
     }
 }

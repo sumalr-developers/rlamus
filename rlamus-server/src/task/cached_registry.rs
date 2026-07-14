@@ -14,14 +14,14 @@ use tokio::sync::{
 };
 use uuid::Uuid;
 
-use crate::task::{Task, TaskRegistry};
+use crate::task::{Task, TaskRegistry, expire::WithTaskId};
 
 pub struct CachedRegistry<Inner>
 where
     Inner: TaskRegistry + Send + Sync + 'static,
     Inner::Error: Display,
 {
-    inner: Arc<RwLock<Inner>>,
+    inner: Arc<Inner>,
     cache: Arc<RwLock<HashMap<Uuid, Task>>>,
     cache_limit: usize,
     op_queue: Arc<RwLock<HashMap<Uuid, Op>>>,
@@ -45,7 +45,7 @@ where
     pub fn new(inner: Inner) -> Self {
         let (tx, rx) = broadcast::channel(1);
         Self {
-            inner: Arc::new(RwLock::new(inner)),
+            inner: Arc::new(inner),
             cache: Default::default(),
             cache_limit: 50,
             op_queue: Default::default(),
@@ -72,11 +72,12 @@ where
     }
 
     pub async fn flush(&self) -> Result<(), Error<Inner::Error>> {
-        let mut inner = self.inner.write().await;
+        let inner = Arc::clone(&self.inner);
         let mut op_queue = self.op_queue.write().await;
         for (id, op) in op_queue.iter() {
             match op {
                 Op::Insert => {
+                    tracing::trace!("flush: inserting {id}");
                     inner
                         .insert(self.cache.read().await.get(id).unwrap().clone())
                         .await
@@ -86,6 +87,7 @@ where
                         })?;
                 }
                 Op::Remove => {
+                    tracing::trace!("flush: removing {id}");
                     inner.remove(id).await.map_err(|err| Error {
                         id: Some(id.clone()),
                         inner: err,
@@ -108,13 +110,12 @@ where
         let op_queue = Arc::clone(&self.op_queue);
         let cache = Arc::clone(&self.cache);
         tokio::spawn(async move {
-            let mut write_guard = inner.write().await;
             let mut cache = cache.write().await;
             for (id, op) in op_queue.read().await.iter() {
                 if let Some(task) = cache.remove(id) {
                     let err = match op {
-                        Op::Insert => write_guard.insert(task).await.err(),
-                        Op::Remove => write_guard.remove(&id).await.err(),
+                        Op::Insert => inner.insert(task).await.err(),
+                        Op::Remove => inner.remove(&id).await.err(),
                     };
                     if let Some(err) = err {
                         tracing::error!("error for {id}: {err}");
@@ -181,7 +182,7 @@ where
         if let Some(task) = self.cache.read().await.get(id).cloned() {
             return Ok(Some(task));
         }
-        let read = self.inner.read().await.get(id).await.map_err(|err| Error {
+        let read = self.inner.get(id).await.map_err(|err| Error {
             id: Some(id.clone()),
             inner: err,
         })?;
@@ -193,7 +194,7 @@ where
 
     fn iter(&self) -> impl Stream<Item = Result<Task, Self::Error>> {
         stream! {
-            let inner = self.inner.read().await;
+            let inner = Arc::clone(&self.inner);
             let mut stream = Box::pin(inner.iter());
             while let Some(task) = stream.next().await {
                 yield task.map_err(|err| Error {
@@ -239,5 +240,14 @@ where
             .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
             .body(self.to_string().into())
             .unwrap()
+    }
+}
+
+impl<Inner> WithTaskId for Error<Inner>
+where
+    Inner: WithTaskId,
+{
+    fn task_id(&self) -> Option<&Uuid> {
+        self.id.as_ref().or(self.inner.task_id())
     }
 }

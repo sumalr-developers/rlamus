@@ -1,6 +1,6 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fmt::Display, sync::Arc, time::Duration};
 
-use futures::TryStreamExt as _;
+use futures::{StreamExt, TryStreamExt as _};
 use thiserror::Error;
 use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
@@ -24,32 +24,6 @@ where
             timeout,
             timers: Default::default(),
         }
-    }
-
-    pub async fn start(&mut self) -> Result<(), Error<R::Error>> {
-        if !self.timers.is_empty() {
-            return Err(Error::NonEmptyTimers);
-        }
-        self.timers.extend(
-            self.registry
-                .iter()
-                .map_ok(|task| {
-                    let task_id = task.id.clone();
-                    let registry = Arc::clone(&self.registry);
-                    let timeout = self.timeout;
-                    (
-                        task.id,
-                        AbortOnDropHandle::new(tokio::spawn(async move {
-                            tokio::time::sleep(timeout).await;
-                            registry.remove(&task_id).await?;
-                            return Ok(());
-                        })),
-                    )
-                })
-                .try_collect::<BTreeMap<_, _>>()
-                .await?,
-        );
-        Ok(())
     }
 
     pub async fn stop(&mut self) {
@@ -86,6 +60,56 @@ where
             RemoveResult::Noop
         }
     }
+}
+
+impl<R> Expire<R>
+where
+    R: TaskRegistry + Sync + 'static,
+    R::Error: Send + Display + WithTaskId + 'static,
+{
+    pub async fn start(&mut self) -> Result<(), Error<R::Error>> {
+        if !self.timers.is_empty() {
+            return Err(Error::NonEmptyTimers);
+        }
+        let new_timers = self
+            .registry
+            .iter()
+            .map_ok(|task| {
+                let task_id = task.id.clone();
+                let registry = Arc::clone(&self.registry);
+                let timeout = self.timeout;
+                (
+                    task.id,
+                    AbortOnDropHandle::new(tokio::spawn(async move {
+                        tokio::time::sleep(timeout).await;
+                        registry.remove(&task_id).await?;
+                        return Ok(());
+                    })),
+                )
+            })
+            .collect::<Vec<_>>()
+            .await;
+        for new_timer in new_timers {
+            match new_timer {
+                Ok((id, task)) => {
+                    self.timers.insert(id, task);
+                }
+                Err(err) => {
+                    if let Some(task_id) = err.task_id() {
+                        tracing::warn!("{err}; expiring {task_id} immediately");
+                        self.registry.remove(task_id).await?;
+                    } else {
+                        tracing::warn!("{err}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub trait WithTaskId {
+    fn task_id(&self) -> Option<&Uuid>;
 }
 
 #[derive(Debug, Error)]
