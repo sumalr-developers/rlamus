@@ -101,7 +101,7 @@ in
           ++ (lib.optional (cfg.extraEnv != null) cfg.extraEnv)
           ++ lib.optional (cfg.ollamaEndpoint != null) "OLLAMA_ENDPOINT=${cfg.ollamaEndpoint}"
           ++ lib.optional (cfg.modelName != null) "RLAUMS_MODEL=${cfg.modelName}";
-          DynamicUser = true;
+          DynamicUser = !staticUser;
           WorkingDirectory = cfg.dataDir;
           StateDirectory = [ (lib.removePrefix "/var/lib/" cfg.dataDir) ];
           ReadWritePaths = [ cfg.dataDir ];
