@@ -96,6 +96,8 @@ in
           );
           Environment = [
             "CHROMIUM_BIN=${lib.getExe cfg.chromiumPackage}"
+            "XDG_CONFIG_HOME=${cfg.dataDir}/.chromium"
+            "XDG_CACHE_HOME=${cfg.dataDir}/.chromium"
           ]
           ++ (lib.optional (cfg.extraEnv != null) cfg.extraEnv)
           ++ lib.optional (cfg.ollamaEndpoint != null) "OLLAMA_ENDPOINT=${cfg.ollamaEndpoint}"
